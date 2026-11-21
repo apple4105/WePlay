@@ -181,9 +181,9 @@ final class LinkController {
                 return
             }
             do {
-                let signature = try authenticator.sign(challenge: challenge)
-                diag.log("认证", "challenge 已签名（\(signature.count) B）→ 0x0023")
-                send(message: AccessoryMessages.authenticationResponse(signature: signature))
+                let response = try authenticator.respond(toChallenge: challenge)
+                diag.log("认证", "challenge 已签名（\(response.signature.count) B）→ 0x0023")
+                send(message: AccessoryMessages.authenticationResponse(signature: response.signature))
             } catch {
                 diag.error("认证", "签名失败：\(error)")
             }
