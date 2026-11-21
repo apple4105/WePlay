@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 /// 全局诊断中心：所有模块的日志都汇到这里。
 ///

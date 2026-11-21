@@ -205,7 +205,7 @@ final class LinkController {
 
         mediaListener = MediaTCPListener()
         mediaListener.onLog = { diag.log("媒体", $0) }
-        mediaListener.onError = { diag.error("媒体", $0) }
+        mediaListener.onError = { diag.error("媒体", String(describing: $0)) }
         mediaListener.onConnection = { conn in
             diag.log("媒体", "iPhone 已连入媒体端口 \(conn.peerAddress)")
 
