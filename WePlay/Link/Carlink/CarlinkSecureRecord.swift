@@ -96,7 +96,12 @@ struct CarlinkSecureRecord {
             // 先按错误上报，真机抓到非 12 长度再补长 IV 的 GCM J0 计算。
             throw CarlinkError.badPacket("unsupported_iv_len_\(ivLen)")
         }
-        let sealed = try AES.GCM.SealedBox(combined: payload)
-        return try AES.GCM.open(sealed, using: key, nonce: AES.GCM.Nonce(data: iv))
+        // 车机可能发非 12 字节 IV：SealedBox 手动组装（nonce/ciphertext/tag 分开传）
+        let sealed = try AES.GCM.SealedBox(
+            nonce: AES.GCM.Nonce(data: iv),
+            ciphertext: payload.dropLast(16),
+            tag: payload.suffix(16)
+        )
+        return try AES.GCM.open(sealed, using: key)
     }
 }
