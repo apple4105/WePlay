@@ -1,0 +1,31 @@
+# credentials — never commit
+Resources/leaf.cer
+Resources/private.x963
+Resources/certificate.p7b
+Resources/identity.pk8
+*.cer
+*.p7b
+*.x963
+*.pk8
+*.p12
+*.pem
+*.mobileprovision
+
+# signing material
+.signing/
+
+# Xcode / build
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+*.ipa
+*.dSYM
+*.dSYM.zip
+
+# misc
+__pycache__/
+*.pyc
+.DS_Store

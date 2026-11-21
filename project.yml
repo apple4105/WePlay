@@ -1,0 +1,48 @@
+# WePlay 的 XcodeGen 工程描述
+# 用法：xcodegen generate   （macOS 上 brew install xcodegen）
+# 好处：仓库里不提交 .xcodeproj/pbxproj（避免合并冲突），CI 和本地用同一份描述生成。
+name: WePlay
+
+options:
+  bundleIdPrefix: com.weplay
+  createIntermediateGroups: true
+  deploymentTarget: "16.0"
+  developmentTeam: ""            # 本地要真机调试时填你的 Team ID；CI 出未签名 IPA 不用填
+
+targets:
+  WePlay:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+
+    # 源码 + 资源（.cer/.x963 需要进 Copy Bundle Resources，App 运行时从 bundle 读）
+    sources:
+      - path: WePlay
+
+    info:
+      path: WePlay/App/Info.plist
+      properties:
+        CFBundleDisplayName: WePlay
+        CFBundleShortVersionString: "0.1"
+        CFBundleVersion: "1"
+
+    settings:
+      base:
+        PRODUCT_NAME: WePlay
+        PRODUCT_BUNDLE_IDENTIFIER: com.weplay.app
+        INFOPLIST_FILE: WePlay/App/Info.plist
+        SWIFT_VERSION: "5.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        TARGETED_DEVICE_FAMILY: "1,2"           # iPhone + iPad
+        # 私有框架 CoreAccessories 是运行时 dlopen，不需要链接；这里不需要额外配置
+        ENABLE_BITCODE: "NO"
+        # 允许 HTTP 本地网络（车机 IP 直连）
+        NSAppTransportSecurity: {}
+
+    # 依赖的框架都是系统框架（UIKit/CoreBluetooth/NetworkExtension/AVFoundation/
+    # VideoToolbox/Security/CryptoKit/Combine），无需第三方，不需要 pods/spm。
+
+    scheme:
+      gatherCoverageData: false
+      commandLineArguments:
+        "": {}
