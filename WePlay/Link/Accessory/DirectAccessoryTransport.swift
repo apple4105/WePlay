@@ -81,24 +81,25 @@ final class DirectAccessoryTransport: NSObject {
 
         // 2. NSClassFromString 拿 ACCTransportClient 类
         guard let cls = NSClassFromString(Self.clientClassName) as? NSObject.Type else {
-            fail("CoreAccessories transport methods are unavailable or have changed.")
+            fail("ACCTransportClient class not found (framework loaded but class missing).")
             return
         }
 
-        // 3. +sharedClient 单例
+        // 3. +sharedClient 单例。注意这是**类方法**——必须用 responds(to:)，
+        //    instancesRespond(to:) 只查实例方法，会假阴性（0.0.1 联调踩过）。
         let sharedSel = NSSelectorFromString("sharedClient")
-        guard cls.instancesRespond(to: sharedSel) else {
-            fail("CoreAccessories transport methods are unavailable or have changed.")
+        guard cls.responds(to: sharedSel) else {
+            fail("sharedClient class-method missing on ACCTransportClient.")
             return
         }
         clientInstance = cls.perform(sharedSel)?.takeUnretainedValue()
         guard let client = clientInstance else {
-            fail("CoreAccessories refused the connection. This signed app may lack access to the private transport.")
+            fail("sharedClient returned nil — app may lack access to the private transport.")
             return
         }
         log("ACCTransportClient 单例已获取")
 
-        // 4. createConnectionWithType:andIdentifier:
+        // 4. createConnectionWithType:andIdentifier:（实例方法）
         let connectionID = UUID()
         connectionUUID = connectionID.uuidString
         let createConnSel = NSSelectorFromString("createConnectionWithType:andIdentifier:")
@@ -108,7 +109,7 @@ final class DirectAccessoryTransport: NSObject {
             _ = client.perform(createConnSel, with: type, with: connectionID.uuidString)
             log("连接已创建 type=\(type) id=\(connectionID.uuidString)")
         } else {
-            fail("CoreAccessories transport methods are unavailable or have changed.")
+            fail("createConnectionWithType:andIdentifier: selector missing.")
             return
         }
 
@@ -127,7 +128,7 @@ final class DirectAccessoryTransport: NSObject {
             "createEndpointWithTransportType:andProtocol:andIdentifier:andDataOutHandler:forConnectionWithUUID:publishConnection:"
         )
         guard client.responds(to: sel) else {
-            fail("CoreAccessories refused to publish an iAP2 endpoint.")
+            fail("createEndpointWithTransportType:… selector missing.")
             return
         }
 
