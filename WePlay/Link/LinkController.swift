@@ -194,65 +194,128 @@ final class LinkController {
         }
     }
 
-    // MARK: - M5: BLE → WiFi → WFD
+    // MARK: - M5: BLE → WiFi → WFD（含断线恢复）
 
-    /// BLE 扫描车机 + 拿凭证 + 加入网络 + WFD 协商（由外部触发——UI"连接车机"按钮）
+    /// BLE 最近一次拿到的车机凭证。断线重连时优先用它跳过 BLE 扫描；
+    /// 车机 SSID/PSK 长期稳定（车主实测），WFD 反复失败才降级重扫。
+    private var cachedReply: Link.HeadUnitReply?
+
+    /// WFD 连续失败计数（连接成功即清零）
+    private var wfdRetry = 0
+    private let wfdMaxRetry = 3
+    /// WFD 重试退避（秒）
+    private let wfdBackoff = [1, 2, 4]
+
+    /// BLE 扫描超时任务
+    private var bleTimeout: DispatchWorkItem?
+
+    /// 链路内部错误（统一进恢复入口）
+    private enum PipelineError: Error, CustomStringConvertible {
+        case mediaDisconnected
+        var description: String { "媒体连接断开" }
+    }
+
+    /// UI 的"连接车机"按钮。有缓存凭证时跳过 BLE 直连，失败自动降级重扫。
     func connectToCar() {
         let diag = Diagnostics.shared
-        diag.log("管线", "── M5: 连接车机 ──")
+        diag.log("管线", "── 连接车机 ──")
+        wfdRetry = 0
+
+        // 上次 stop 可能停掉了媒体监听，重新起一个（端口随 startSession 通告给 iPhone）
+        startMediaSession()
+
+        if let reply = cachedReply {
+            diag.log("管线", "有缓存凭证（SSID=\(reply.ssid)），跳过 BLE 直连")
+            phase = .bleConnected
+            joinCarWiFi(reply)
+            return
+        }
+        scanBLE()
+    }
+
+    /// BLE 扫描拿凭证。12 秒扫不到广播 = 车机不在附近（熄火/未开投屏），停止。
+    private func scanBLE() {
+        let diag = Diagnostics.shared
 
         bleBootstrap = LinkBootstrap()
         bleBootstrap.onLog = { diag.log("BLE", $0) }
         bleBootstrap.onFailure = { diag.error("BLE", String(describing: $0)) }
         bleBootstrap.onCredentials = { [weak self] reply in
             guard let self else { return }
+            self.bleTimeout?.cancel()
+            self.bleTimeout = nil
             diag.log("BLE", "✅ 凭证到手 SSID=\(reply.ssid) freq=\(reply.freq) port=\(reply.port)")
+            self.cachedReply = reply
             self.phase = .bleConnected
-
-            // 加入车机网络
-            self.wifiJoiner = WiFiJoiner()
-            self.wifiJoiner.onLog = { diag.log("WiFi", $0) }
-            self.wifiJoiner.onFailure = { diag.error("WiFi", String(describing: $0)) }
-            self.wifiJoiner.onJoined = { [weak self] ssid in
-                guard let self else { return }
-                self.phase = .wifiJoined
-                diag.log("管线", "已加入车机网络 \(ssid)")
-                // BLE 只给了 MAC/端口；RTSP 在车机（AP 网关）上，IP 用网关推断
-                let host = self.wifiJoiner.guessGatewayIPv4() ?? "192.168.43.1"
-                diag.log("管线", "车机 IP 推断为 \(host)（MAC=\(reply.mac)）")
-                self.startWFD(host: host, port: UInt16(reply.port))
-            }
-            self.wifiJoiner.onManualJoinRequired = { (ssid, psk) in
-                diag.warn("WiFi", "需要手动加入：SSID=\(ssid) 密码=\(psk)")
-                diag.log("管线", "请在 设置→Wi-Fi 里连接 \(ssid)，然后回到 App")
-                self.phase = .wifiJoined
-                // 手动加入后无法监听系统回调——用户告知已连上后调 startWFD
-            }
-            self.wifiJoiner.join(ssid: reply.ssid, psk: reply.psk)
+            self.joinCarWiFi(reply)
         }
-
         // 配对码由 UI 输入后调 bleBootstrap.submitPinCode(_:)
         bleBootstrap.onPinCodeRequired = { code in
-            diag.log("BLE", "车机请求配对码：\(code)")
+            diag.log("BLE", "车机请求配对码：\(code)（请在车机屏幕查看后输入）")
         }
 
         bleBootstrap.startScanning()
+
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.cachedReply == nil, self.phase != .idle else { return }
+            diag.warn("BLE", "12 秒未发现车机广播——车机可能不在附近（熄火/未开投屏）")
+            diag.log("管线", "停止扫描。车机就绪后再按「连接车机」")
+            self.bleBootstrap?.stop()
+            self.bleBootstrap = nil
+            self.phase = .transportReady
+        }
+        bleTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: timeout)
     }
 
-    /// BLE 凭证到手 + 已加入车机网络后启动 WFD
-    private func startWFD(host: String, port: UInt16) {
+    /// 加入车机网络。NEHotspot 失败自动重试一次；系统对记住的网络通常会自己回连。
+    private func joinCarWiFi(_ reply: Link.HeadUnitReply) {
         let diag = Diagnostics.shared
-        diag.log("管线", "── M5: WFD Source ──")
+        wifiJoiner = WiFiJoiner()
+        wifiJoiner.onLog = { diag.log("WiFi", $0) }
+        wifiJoiner.onFailure = { [weak self] error in
+            diag.error("WiFi", String(describing: error))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                guard let self, self.phase != .idle else { return }
+                diag.log("WiFi", "3 秒后重试加入 \(reply.ssid)")
+                self.wifiJoiner?.join(ssid: reply.ssid, psk: reply.psk)
+            }
+        }
+        wifiJoiner.onJoined = { [weak self] ssid in
+            guard let self else { return }
+            self.phase = .wifiJoined
+            diag.log("管线", "已加入车机网络 \(ssid)")
+            self.startWFD(reply)
+        }
+        wifiJoiner.onManualJoinRequired = { (ssid, psk) in
+            diag.warn("WiFi", "需要手动加入：SSID=\(ssid) 密码=\(psk)")
+            diag.log("管线", "请在 设置→Wi-Fi 里连接 \(ssid)，然后回到 App 再按「连接车机」（凭证已缓存，会直连）")
+            // 手动模式下不自动继续：用户连好后再按连接，走缓存凭证 → join 立即成功 → WFD
+        }
+        wifiJoiner.join(ssid: reply.ssid, psk: reply.psk)
+    }
+
+    /// 启动 WFD（RTSP M1-M5）。失败由统一恢复入口按指数退避重试。
+    private func startWFD(_ reply: Link.HeadUnitReply) {
+        let diag = Diagnostics.shared
+        diag.log("管线", "── WFD Source ──")
+
+        // BLE 只给了 MAC/端口；RTSP 在车机（AP 网关）上，IP 用网关推断
+        let host = wifiJoiner?.guessGatewayIPv4() ?? "192.168.43.1"
+        diag.log("管线", "车机 IP 推断为 \(host)（MAC=\(reply.mac)）")
 
         displaySource = DisplaySource()
         displaySource.onLog = { diag.log("WFD", $0) }
-        displaySource.onFailure = { diag.error("WFD", String(describing: $0)) }
+        displaySource.onFailure = { [weak self] error in
+            self?.handleLinkFailure(error)
+        }
         displaySource.onDisplayMode = { mode in
             diag.log("WFD", "车机声明 display=\(mode.width)×\(mode.height) dpi=\(mode.dpi) fps=\(mode.fps)")
             // 把车机的分辨率/帧率告诉 CarPlay（iAP2 identification 时用）
         }
         displaySource.onReady = { [weak self] session in
             guard let self else { return }
+            self.wfdRetry = 0
             self.phase = .wfdNegotiating
             diag.log("管线", "WFD 会话已建立 → 等待 CarPlay 数据")
 
@@ -260,39 +323,89 @@ final class LinkController {
             // 解出视频帧后 → 这里做 RTP 打包 → 车机
             self.rtpPacketizer = RTPPacketizer()
             diag.log("管线", "RTP 打包器就绪（视频 \(session.host):\(session.port)）")
-
-            // 媒体会话指向本机 MediaTCPListener（同机回环）
-            let port = self.mediaListener?.port ?? 0
-            guard port != 0 else {
-                diag.error("管线", "媒体监听端口未就绪，无法发 startSession")
-                return
-            }
-            let deviceID = SHA256.hash(data: self.identity?.leafCertificate ?? Data()).prefix(8)
-                .map { String(format: "%02X", $0) }.joined()
-            let ss = AccessoryMessages.startSession(address: "127.0.0.1", port: port, deviceID: deviceID)
-            diag.log("iAP2", "→ startSession (0x4301) 127.0.0.1:\(port)")
-            self.send(message: ss)
+            self.sendStartSession()
         }
 
-        displaySource.connect(host: host, port: port)
+        displaySource.connect(host: host, port: UInt16(reply.port))
+    }
+
+    /// WFD 就绪后把媒体会话指向本机 MediaTCPListener（同机回环）
+    private func sendStartSession() {
+        let diag = Diagnostics.shared
+        let port = mediaListener?.port ?? 0
+        guard port != 0 else {
+            diag.error("管线", "媒体监听端口未就绪，无法发 startSession")
+            return
+        }
+        let deviceID = SHA256.hash(data: identity?.leafCertificate ?? Data()).prefix(8)
+            .map { String(format: "%02X", $0) }.joined()
+        let ss = AccessoryMessages.startSession(address: "127.0.0.1", port: port, deviceID: deviceID)
+        diag.log("iAP2", "→ startSession (0x4301) 127.0.0.1:\(port)")
+        send(message: ss)
+    }
+
+    // MARK: - 断线恢复
+
+    /// 链路断开的统一入口。策略（不依赖真机，真机联调再校准车机侧行为）：
+    /// - WFD/媒体断（Wi-Fi 一般还在）→ 退避重试 RTSP（1s/2s/4s），状态回退到 wifiJoined/wfdNegotiating
+    /// - 3 次仍失败 → 清凭证缓存，降级重扫 BLE（车机可能重启换了端口）
+    /// - 用户已按停止（phase == .idle）→ 在途重试自动放弃
+    private func handleLinkFailure(_ error: Error) {
+        let diag = Diagnostics.shared
+        let wasActive = (phase == .carPlayActive)
+        diag.warn("管线", "链路断开（\(wasActive ? "投屏中" : "协商中")）：\(error)")
+
+        guard phase != .idle, let reply = cachedReply else {
+            diag.error("管线", "无缓存凭证且链路已断，请手动重连")
+            return
+        }
+
+        if wfdRetry >= wfdMaxRetry {
+            diag.error("管线", "WFD 重试 \(wfdRetry) 次仍失败——清凭证缓存，降级重扫 BLE")
+            cachedReply = nil
+            wfdRetry = 0
+            phase = .transportReady
+            displaySource?.stop()
+            scanBLE()
+            return
+        }
+
+        let delay = wfdBackoff[min(wfdRetry, wfdBackoff.count - 1)]
+        wfdRetry += 1
+        phase = wasActive ? .wfdNegotiating : .wifiJoined
+        diag.log("管线", "\(wfdRetry)/\(wfdMaxRetry) 次重试 WFD，\(delay) 秒后")
+        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(delay)) { [weak self] in
+            guard let self, self.phase != .idle else { return }
+            self.displaySource?.stop()
+            self.startWFD(reply)
+        }
     }
 
     // MARK: - M4: CarPlay 媒体会话
 
-    /// CarPlay 栈连入媒体端口后建立会话
+    /// CarPlay 栈连入媒体端口后建立会话。
+    /// 连入 = 投屏真正激活（phase → carPlayActive）；关闭 = 进断线恢复。
     func startMediaSession() {
         let diag = Diagnostics.shared
         diag.log("管线", "── M4: 媒体会话 ──")
 
+        mediaListener?.stop()   // 重建前先 cancel 旧的，避免端口泄漏
         mediaListener = MediaTCPListener()
         mediaListener.onLog = { diag.log("媒体", $0) }
         mediaListener.onError = { diag.error("媒体", String(describing: $0)) }
-        mediaListener.onConnection = { conn in
+        mediaListener.onConnection = { [weak self] conn in
             diag.log("媒体", "iPhone 已连入媒体端口 \(conn.peerAddress)")
+            self?.phase = .carPlayActive
+            diag.log("管线", "CarPlay 媒体通道建立——投屏激活")
+
+            conn.onClose = { [weak self] in
+                diag.warn("媒体", "媒体连接关闭")
+                self?.handleLinkFailure(PipelineError.mediaDisconnected)
+            }
 
             // 触摸回传
-            self.touchRelay = TouchRelay()
-            self.touchRelay.onTouchReport = { [weak self] report in
+            self?.touchRelay = TouchRelay()
+            self?.touchRelay.onTouchReport = { [weak self] report in
                 diag.hex("触摸", "HID report", report)
                 // 发回 iPhone：transport.sendToPhone(report)
                 self?.transport?.sendToPhone(report)
@@ -303,12 +416,16 @@ final class LinkController {
 
     // MARK: - 停止
 
+    /// 用户主动断开。注意 **不停 transport**（虚拟 accessory 保持就绪，
+    /// 下次连接不用重建端点）；车机凭证缓存也保留，重连可跳过 BLE。
     func stop() {
-        transport?.stop()
+        bleTimeout?.cancel()
+        bleTimeout = nil
+        wfdRetry = 0
         bleBootstrap?.stop()
-        displaySource?.stop()
+        displaySource?.stop()   // 会向车机发 TEARDOWN
         mediaListener?.stop()
         phase = .idle
-        Diagnostics.shared.log("管线", "已停止")
+        Diagnostics.shared.log("管线", "已停止（保留 accessory 与车机凭证缓存）")
     }
 }
