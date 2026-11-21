@@ -106,7 +106,7 @@ final class LinkController {
             Diagnostics.shared.hex("iAP2", "包", packet.encode())
             // M2: MFi challenge 处理——真机确认具体消息 ID 后在这里分发
         }
-        linkParser.onMessage = { [weak self] message in
+        linkParser.onMessage = { message in
             diag.log("iAP2", "消息 id=0x\(String(message.id, radix: 16)) 参数 \(message.parameters.count) 条")
             // M2: 如果消息里有 challenge → authenticator.respond(toChallenge:) → 构造回消息
         }
@@ -156,7 +156,7 @@ final class LinkController {
             self.wifiJoiner.onManualJoinRequired = { (ssid, psk) in
                 diag.warn("WiFi", "需要手动加入：SSID=\(ssid) 密码=\(psk)")
                 diag.log("管线", "请在 设置→Wi-Fi 里连接 \(ssid)，然后回到 App")
-                self?.phase = .wifiJoined
+                self.phase = .wifiJoined
                 // 手动加入后无法监听系统回调——用户告知已连上后调 startWFD
             }
             self.wifiJoiner.join(ssid: reply.ssid, psk: reply.psk)
