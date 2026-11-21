@@ -6,10 +6,10 @@ jobs:
     steps:
       - run: echo "ubuntu ok"
   probe-mac:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - run: echo "macos-14 ok"
   probe-mac15:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - run: echo "macos-15 ok"
