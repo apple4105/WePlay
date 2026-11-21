@@ -26,9 +26,28 @@ targets:
     info:
       path: WePlay/App/Info.plist
       properties:
+        CFBundleDevelopmentRegion: zh_CN
         CFBundleDisplayName: WePlay
         CFBundleShortVersionString: "0.0.1"
         CFBundleVersion: "1"   # CI 会用 plutil 覆盖为 run number
+        LSRequiresIPhoneOS: true
+        # 权限描述：xcodegen 生成 plist 时会覆盖仓库文件，所以必须写在这里（缺失=点击蓝牙即闪退）
+        NSBluetoothAlwaysUsageDescription: "WePlay 需要蓝牙来与车机建立投屏连接。"
+        NSBluetoothPeripheralUsageDescription: "WePlay 需要蓝牙来与车机建立投屏连接。"
+        NSLocationWhenInUseUsageDescription: "WePlay 需要定位权限以扫描附近车机的蓝牙广播。"
+        NSLocalNetworkUsageDescription: "WePlay 需要本地网络把画面传给车机。"
+        NSMicrophoneUsageDescription: "WePlay 需要麦克风以支持语音输入。"
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        UIBackgroundModes: [audio]
+        UILaunchScreen: {}
+        UIRequiredDeviceCapabilities: [arm64]
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationPortrait
+        UIViewControllerBasedStatusBarAppearance: false
+        UIUserInterfaceStyle: Dark
 
     settings:
       base:
