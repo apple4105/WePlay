@@ -145,7 +145,7 @@ final class DirectAccessoryTransport: NSObject {
         let result = sendEndpointCreate(
             to: client, sel: sel,
             type: type,
-            protocol: protocolName,
+            proto: protocolName,
             identifier: endpointUUID,
             handler: block,
             connectionUUID: connectionUUID,
