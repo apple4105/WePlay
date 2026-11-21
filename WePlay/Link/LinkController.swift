@@ -60,9 +60,10 @@ final class LinkController {
 
     private(set) var phase: Phase = .idle {
         didSet {
-            Diagnostics.shared.log("状态", "→ \(phase.rawValue)")
+            let text = phase.rawValue
+            Diagnostics.shared.log("状态", "→ \(text)")
             // UI 直接同步——不依赖订阅时机，onAppear 前发生的状态迁移也能显示
-            DispatchQueue.main.async { PipelineState.shared.phaseText = phase.rawValue }
+            DispatchQueue.main.async { PipelineState.shared.phaseText = text }
             onPhaseChanged?(phase)
         }
     }
