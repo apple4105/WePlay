@@ -76,4 +76,5 @@ jobs:
         with:
           name: WePlay-unsigned-ipa
           path: build/WePlay-unsigned.ipa
-          retention-days: 14
+          # 产物含 MFi 身份文件：1 天自动删除，缩小公开暴露窗口；测试期手动下载即可
+          retention-days: 1
