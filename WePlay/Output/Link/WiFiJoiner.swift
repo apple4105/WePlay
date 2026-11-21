@@ -42,7 +42,7 @@ struct WiFiJoiner {
         onLog?("[WiFi] 准备加入 SSID=\(ssid)（psk \(psk.count) 位）")
 
         guard useHotspotConfiguration else {
-            onManualJoinRequired?((ssid, psk))
+            onManualJoinRequired?(ssid, psk)
             return
         }
 
