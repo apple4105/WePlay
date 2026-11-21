@@ -2,15 +2,16 @@ import Foundation
 
 /// link 链路层数据包。
 ///
-/// ## 9 字节头布局（按 Apple link 规范）
+/// ## 9 字节头布局（2026-11-21 定稿：Wireshark 公开解析器 + CarWithin 二进制双源一致）
 ///
 /// ```
 ///  偏移  大小  字段
 ///   0     2    SOP = 0xFF 0x5A
-///   2     2    包总长（LE16，含这 9 字节头 + 载荷 + 载荷校验）
+///   2     2    包总长（BE16，含这 9 字节头 + 载荷 + 1 字节载荷校验）
 ///   4     1    控制字节
-///   5     1    序列号（置了 ACK 位时，这个字节表示"确认到哪个序列号"）
-///   6     2    会话 ID（LE16；控制会话 = 0x0000）
+///   5     1    序列号
+///   6     1    确认号（ACK 位置位时有效）
+///   7     1    会话 ID（1 字节；控制会话 = 0x00）
 ///   8     1    头校验
 ///   9     N    载荷（N = 总长 - 10）
 ///  末     1    载荷校验
@@ -21,7 +22,7 @@ import Foundation
 /// | 位 | 掩码 | 含义 |
 /// |----|------|------|
 /// | 7 | 0x80 | SYN 链路同步 |
-/// | 6 | 0x40 | ACK（确认号有效，见序列号字段） |
+/// | 6 | 0x40 | ACK（确认号有效） |
 /// | 5 | 0x20 | EAK 扩展确认（载荷里是一串乱序序列号） |
 /// | 4 | 0x10 | RST 链路重置 |
 /// | 3 | 0x08 | SLP 设备休眠 |
@@ -29,11 +30,7 @@ import Foundation
 /// ## 校验
 ///
 /// 2 的补码和：被覆盖的所有字节与校验字节相加 ≡ 0 (mod 256)。
-/// 头校验覆盖偏移 2..7（长度+控制+序列+会话ID），载荷校验覆盖整个载荷。
-///
-///
-/// 偏移 6..7 的字段切分按规范定义实施；联调时若握手失败，先打印原始 hex
-/// 核对（`LinkParser` 已留 `onRawPacket` 钩子），对不上只需改 `decode`/`encode` 一处。
+/// 头校验覆盖偏移 2..7，载荷校验覆盖整个载荷。
 struct LinkPacket: Equatable {
 
     // MARK: 控制位
@@ -48,35 +45,31 @@ struct LinkPacket: Equatable {
     static let headerSize = 9
 
     /// 控制会话 ID
-    static let controlSessionID: UInt16 = 0x0000
+    static let controlSessionID: UInt8 = 0x00
 
     // MARK: 字段
 
     var control: UInt8
     var sequence: UInt8
-    var sessionID: UInt16
+    var acknowledgement: UInt8
+    var sessionID: UInt8
     var payload: Data
 
-    init(control: UInt8, sequence: UInt8 = 0, sessionID: UInt16 = LinkPacket.controlSessionID, payload: Data = Data()) {
+    init(control: UInt8,
+         sequence: UInt8 = 0,
+         acknowledgement: UInt8 = 0,
+         sessionID: UInt8 = LinkPacket.controlSessionID,
+         payload: Data = Data()) {
         self.control = control
         self.sequence = sequence
+        self.acknowledgement = acknowledgement
         self.sessionID = sessionID
         self.payload = payload
     }
 
-    /// ACK 位是否置位
     var isACK: Bool { control & Self.controlACK != 0 }
-
-    /// SYN 位是否置位
     var isSYN: Bool { control & Self.controlSYN != 0 }
-
-    /// EAK 位是否置位
     var isEAK: Bool { control & Self.controlEAK != 0 }
-
-    /// 置了 ACK 位时，序列号字段的含义变成"确认号"
-    var acknowledgement: UInt8? {
-        isACK ? sequence : nil
-    }
 
     // MARK: 校验
 
@@ -105,14 +98,13 @@ struct LinkPacket: Equatable {
         var out = Data(capacity: total)
         out.append(Self.sop.0)
         out.append(Self.sop.1)
-        out.append(UInt8(total & 0xFF))
-        out.append(UInt8((total >> 8) & 0xFF))
+        out.appendBE16(UInt16(total))
         out.append(control)
         out.append(sequence)
-        out.append(UInt8(sessionID & 0xFF))
-        out.append(UInt8((sessionID >> 8) & 0xFF))
+        out.append(acknowledgement)
+        out.append(sessionID)
 
-        // 头校验覆盖 偏移 2..7（长度+控制+序列+会话ID 共 6 字节，不含 SOP）
+        // 头校验覆盖 偏移 2..7（长度+控制+序列+确认号+会话ID 共 6 字节，不含 SOP）
         out.append(Self.checksum(out.suffix(6)))
 
         out.append(payload)
@@ -139,14 +131,15 @@ struct LinkPacket: Equatable {
             return .badSync
         }
 
-        let length = Int(data[data.startIndex + 2]) | (Int(data[data.startIndex + 3]) << 8)
+        let length = data.be16(at: 2)
         guard length >= headerSize + 1 else { return .badSync }   // 至少有载荷校验位
         guard data.count >= length else { return .needMore }
 
         let base = data.startIndex
         let controlByte = data[base + 4]
         let seq = data[base + 5]
-        let session = UInt16(data[base + 6]) | (UInt16(data[base + 7]) << 8)
+        let ack = data[base + 6]
+        let session = data[base + 7]
         let headerChecksum = data[base + 8]
 
         let headerCovered = data[base + 2 ..< base + 8]
@@ -158,7 +151,23 @@ struct LinkPacket: Equatable {
         let payloadChecksum = data[base + length - 1]
         guard verify(payload, checksum: payloadChecksum) else { return .badSync }
 
-        return .packet(LinkPacket(control: controlByte, sequence: seq, sessionID: session, payload: Data(payload)),
+        return .packet(LinkPacket(control: controlByte, sequence: seq,
+                                  acknowledgement: ack, sessionID: session,
+                                  payload: Data(payload)),
                        consumed: length)
+    }
+}
+
+extension Data {
+    /// 大端 16 位写入（link 层长度/消息 ID/参数 ID 一律大端——2026-11-21 双源验证定稿）
+    mutating func appendBE16(_ v: UInt16) {
+        append(UInt8((v >> 8) & 0xFF))
+        append(UInt8(v & 0xFF))
+    }
+
+    /// 大端 16 位读取（绝对偏移，从 startIndex 起算）
+    func be16(at offset: Int) -> Int {
+        let base = startIndex
+        return (Int(self[base + offset]) << 8) | Int(self[base + offset + 1])
     }
 }

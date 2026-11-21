@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// 链路子系统总控——把所有模块串成完整管线。
 ///
@@ -42,6 +43,10 @@ final class LinkController {
 
     // MARK: - 状态
 
+    /// 链路层发送/接收序列号（发包用 ACK 位 + 递增序列）
+    private var txSequence: UInt8 = 0
+    private var rxSequence: UInt8 = 0
+
     enum Phase: String, CaseIterable {
         case idle = "未启动"
         case identityLoaded = "身份已装载"
@@ -79,6 +84,9 @@ final class LinkController {
 
         // ── M3: 虚拟 accessory ──
         startTransport()
+
+        // ── M4: 媒体监听提前起好，startSession 时端口已绑定 ──
+        startMediaSession()
     }
 
     /// M2: 装载配件身份
@@ -104,19 +112,29 @@ final class LinkController {
         transport.onReady = { [weak self] in
             guard let self else { return }
             self.phase = .transportReady
-            diag.log("管线", "虚拟 accessory 就绪，等待 iPhone CarPlay 接入")
-            self.startLinkParser()
+            diag.log("管线", "虚拟 accessory 就绪，发送 SYN + identification")
+            // 控制会话先同步（SYN），再报身份
+            self.sendRaw(LinkPacket(control: LinkPacket.controlSYN, sequence: 0,
+                                    sessionID: LinkPacket.controlSessionID).encode())
+            let name = (Bundle.main.infoDictionary?["CFBundleDisplayName"] as? String) ?? "CP-Receiver-1"
+            let certData = self.identity?.leafCertificate ?? Data()
+            let deviceID = SHA256.hash(data: certData).prefix(8)
+                .map { String(format: "%02X", $0) }.joined()
+            let ident = AccessoryMessages.identification(name: name, deviceID: deviceID)
+            diag.log("iAP2", "→ identification (0x1D01)，\(ident.parameters.count) 参数")
+            self.send(message: ident)
         }
 
         // LinkParser 解 iAP2 包，消息/原始数据都打日志
         linkParser = LinkParser()
-        linkParser.onPacket = { packet in
+        linkParser.onPacket = { [weak self] packet in
+            guard let self else { return }
             Diagnostics.shared.hex("iAP2", "包", packet.encode())
-            // M2: MFi challenge 处理——真机确认具体消息 ID 后在这里分发
+            self.rxSequence = packet.sequence
         }
-        linkParser.onMessage = { message in
-            diag.log("iAP2", "消息 id=0x\(String(message.id, radix: 16)) 参数 \(message.parameters.count) 条")
-            // M2: 如果消息里有 challenge → authenticator.respond(toChallenge:) → 构造回消息
+        linkParser.onMessage = { [weak self] message in
+            diag.log("iAP2", "← 消息 id=0x\(String(message.id, radix: 16)) 参数 \(message.parameters.count) 条")
+            self?.handleMessage(message)
         }
         linkParser.onError = { diag.warn("iAP2", String(describing: $0)) }
 
@@ -131,9 +149,49 @@ final class LinkController {
         transport.start()
     }
 
-    /// 收到 iPhone 数据后走这里（LinkParser 的回调链）
-    private func startLinkParser() {
-        // 由 startTransport 里启动——此处是消息层处理（M2 challenge 等）
+    // MARK: - iAP2 消息收发
+
+    /// 链路层发包：ACK 位 + 递增序列 + 对端确认号
+    private func send(message: LinkMessage) {
+        txSequence &+= 1
+        let packet = LinkPacket(control: LinkPacket.controlACK,
+                                sequence: txSequence,
+                                acknowledgement: rxSequence,
+                                sessionID: LinkPacket.controlSessionID,
+                                payload: message.encoded())
+        sendRaw(packet.encode())
+    }
+
+    private func sendRaw(_ data: Data) {
+        transport.sendToPhone(data)
+    }
+
+    /// iPhone → 配件的消息分发（MFi 认证等）。
+    /// 认证子参数 ID 按公开 iAP2 规范；真机第一轮对不上时靠诊断日志的 hex 校准。
+    private func handleMessage(_ message: LinkMessage) {
+        let diag = Diagnostics.shared
+        for p in message.parameters {
+            diag.hex("iAP2", "参数 0x\(String(p.id, radix: 16))", p.value)
+        }
+
+        switch message.id {
+        case 0x0022:   // AuthenticationChallenge
+            guard let challenge = message.parameter(0x000D)?.value, let authenticator else {
+                diag.warn("认证", "challenge 消息但缺少 0x000D 参数或身份未装载")
+                return
+            }
+            do {
+                let signature = try authenticator.sign(challenge: challenge)
+                diag.log("认证", "challenge 已签名（\(signature.count) B）→ 0x0023")
+                send(message: AccessoryMessages.authenticationResponse(signature: signature))
+            } catch {
+                diag.error("认证", "签名失败：\(error)")
+            }
+        case 0x0024:   // AuthenticationFailed
+            diag.error("认证", "iPhone 拒绝认证：\(message.parameter(0x000C)?.uintValue() ?? 0)")
+        default:
+            break
+        }
     }
 
     // MARK: - M5: BLE → WiFi → WFD
@@ -202,6 +260,18 @@ final class LinkController {
             // 解出视频帧后 → 这里做 RTP 打包 → 车机
             self.rtpPacketizer = RTPPacketizer()
             diag.log("管线", "RTP 打包器就绪（视频 \(session.host):\(session.port)）")
+
+            // 媒体会话指向本机 MediaTCPListener（同机回环）
+            let port = self.mediaListener?.port ?? 0
+            guard port != 0 else {
+                diag.error("管线", "媒体监听端口未就绪，无法发 startSession")
+                return
+            }
+            let deviceID = SHA256.hash(data: self.identity?.leafCertificate ?? Data()).prefix(8)
+                .map { String(format: "%02X", $0) }.joined()
+            let ss = AccessoryMessages.startSession(address: "127.0.0.1", port: port, deviceID: deviceID)
+            diag.log("iAP2", "→ startSession (0x4301) 127.0.0.1:\(port)")
+            self.send(message: ss)
         }
 
         displaySource.connect(host: host, port: port)
