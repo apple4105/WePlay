@@ -102,7 +102,7 @@ final class LinkController {
 
         // LinkParser 解 iAP2 包，消息/原始数据都打日志
         linkParser = LinkParser()
-        linkParser.onPacket = { [weak self] packet in
+        linkParser.onPacket = { packet in
             Diagnostics.shared.hex("iAP2", "包", packet.encode())
             // M2: MFi challenge 处理——真机确认具体消息 ID 后在这里分发
         }
@@ -110,7 +110,7 @@ final class LinkController {
             diag.log("iAP2", "消息 id=0x\(String(message.id, radix: 16)) 参数 \(message.parameters.count) 条")
             // M2: 如果消息里有 challenge → authenticator.respond(toChallenge:) → 构造回消息
         }
-        linkParser.onError = { diag.warn("iAP2", $0) }
+        linkParser.onError = { diag.warn("iAP2", String(describing: $0)) }
 
         transport.onData = { [weak self] data in
             Diagnostics.shared.hex("传输", "← iPhone", data)
@@ -137,7 +137,7 @@ final class LinkController {
 
         bleBootstrap = LinkBootstrap()
         bleBootstrap.onLog = { diag.log("BLE", $0) }
-        bleBootstrap.onFailure = { diag.error("BLE", $0) }
+        bleBootstrap.onFailure = { diag.error("BLE", String(describing: $0)) }
         bleBootstrap.onCredentials = { [weak self] reply in
             guard let self else { return }
             diag.log("BLE", "✅ 凭证到手 SSID=\(reply.ssid) freq=\(reply.freq) port=\(reply.port)")
@@ -146,7 +146,7 @@ final class LinkController {
             // 加入车机网络
             self.wifiJoiner = WiFiJoiner()
             self.wifiJoiner.onLog = { diag.log("WiFi", $0) }
-            self.wifiJoiner.onFailure = { diag.error("WiFi", $0) }
+            self.wifiJoiner.onFailure = { diag.error("WiFi", String(describing: $0)) }
             self.wifiJoiner.onJoined = { [weak self] ssid in
                 guard let self else { return }
                 self.phase = .wifiJoined
@@ -177,7 +177,7 @@ final class LinkController {
 
         displaySource = DisplaySource()
         displaySource.onLog = { diag.log("WFD", $0) }
-        displaySource.onFailure = { diag.error("WFD", $0) }
+        displaySource.onFailure = { diag.error("WFD", String(describing: $0)) }
         displaySource.onDisplayMode = { mode in
             diag.log("WFD", "车机声明 display=\(mode.width)×\(mode.height) dpi=\(mode.dpi) fps=\(mode.fps)")
             // 把车机的分辨率/帧率告诉 CarPlay（iAP2 identification 时用）

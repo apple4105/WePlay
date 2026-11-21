@@ -49,7 +49,7 @@ final class RTPPacketizer {
 
         for (index, nal) in nals.enumerated() {
             let isLast = index == nals.count - 1
-            let nalType = nal.first.map { $0 & 0x1F } ?? 0
+            _ = nal.first.map { $0 & 0x1F }
 
             // 参数集（SPS=7 / PPS=8）：小块，和后面的 IDR 合并意义不大，
             // 直接按 Single NAL 发（车机 Assembler 会认）
