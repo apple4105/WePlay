@@ -61,7 +61,7 @@ struct AccessoryIdentity {
     /// 算法取 CryptoKit 默认（ECDSA P-256 / SHA-256）。
     /// 只需要改这一个函数。
     func sign(challenge: Data) throws -> Data {
-        try signingKey.signature(for: challenge)
+        try signingKey.signature(for: challenge).derRepresentation
     }
 }
 
