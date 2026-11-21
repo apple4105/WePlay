@@ -73,7 +73,7 @@ struct CarlinkSecureRecord {
         Data(SHA256.hash(data: b))
     }
 
-    private func tryOpen(_ b: Data) throws -> Data {
+    private mutating func tryOpen(_ b: Data) throws -> Data {
         guard b.count >= 8 else { throw CarlinkError.badPacket("invalid_cipher_record") }
         let ivLen = Int(b.be32(at: 0))
         guard (12...32).contains(ivLen), b.count >= ivLen + 8 else {

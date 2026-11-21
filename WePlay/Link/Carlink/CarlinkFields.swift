@@ -76,11 +76,16 @@ enum CarlinkFields {
     }
 
     static func varintField(_ fields: [CarlinkField], _ id: UInt32) -> UInt64 {
-        fields.first { $0.id == id }?.varint ?? 0
+        if let f = fields.first(where: { $0.id == id }), case .varint(let n) = f.value { return n }
+        return 0
     }
 
     static func bytesField(_ fields: [CarlinkField], _ id: UInt32) -> Data? {
-        fields.first { $0.id == id }?.bytes
+        guard let f = fields.first(where: { $0.id == id }) else { return nil }
+        switch f.value {
+        case .bytes(let b), .fixed64(let b), .fixed32(let b): return b
+        case .varint: return nil
+        }
     }
 
     private static func appendVarint(_ out: inout Data, _ v: UInt64) {

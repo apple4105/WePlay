@@ -163,7 +163,7 @@ enum CarlinkError: Error, CustomStringConvertible {
 }
 
 extension Data {
-    /// 大端 32 位写入
+    /// 大端 32 位写入（16 位写入/读取版本在 LinkPacket.swift 的扩展里）
     mutating func appendBE32(_ v: UInt32) {
         append(UInt8((v >> 24) & 0xFF))
         append(UInt8((v >> 16) & 0xFF))
@@ -178,11 +178,5 @@ extension Data {
             | (UInt32(self[base + offset + 1]) << 16)
             | (UInt32(self[base + offset + 2]) << 8)
             | UInt32(self[base + offset + 3])
-    }
-
-    /// 大端 16 位读取（绝对偏移，从 startIndex 起算）
-    func be16(at offset: Int) -> Int {
-        let base = startIndex
-        return (Int(self[base + offset]) << 8) | Int(self[base + offset + 1])
     }
 }

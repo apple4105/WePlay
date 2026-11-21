@@ -108,7 +108,7 @@ final class CarlinkAuth {
         }
         guard quick || self.pin.count >= 6 else { throw CarlinkError.pinRequired }
 
-        let epRaw = rawPublic(ephemeral.publicKey)
+        let epRaw = Self.rawPublic(ephemeral.publicKey)
         // 签名 transcript = 临时公钥 ‖ nonce
         let transcript = epRaw + nonce
         let signature = try identity.signing.signature(for: transcript)
@@ -179,7 +179,7 @@ final class CarlinkAuth {
 
         let carNonce = try sizedBytes(fields, 6, 32)
         let carAgreementRaw = try sizedBytes(fields, 4, 64)
-        let signature = try bytesField(fields, 5) ?? Data()
+        let signature = bytesField(fields, 5) ?? Data()
         guard (1...80).contains(signature.count) else {
             throw CarlinkError.authFailed("invalid_auth_signature")
         }
@@ -207,7 +207,7 @@ final class CarlinkAuth {
         }
 
         // 验证车机签名：transcript = 车机临时公钥 ‖ 手机临时公钥 ‖ 车机nonce ‖ 手机nonce
-        let epRaw = rawPublic(ephemeral!.publicKey)
+        let epRaw = Self.rawPublic(ephemeral!.publicKey)
         let transcript = carAgreementRaw + epRaw + carNonce + nonce
         let carKey = try Self.decodePublic(carIdentityRaw)
         let der = try P256.Signing.ECDSASignature(derRepresentation: signature)
@@ -253,11 +253,8 @@ final class CarlinkAuth {
         return b
     }
 
-    private func bytesField(_ fields: [CarlinkField], _ id: UInt32) throws -> Data {
-        guard let b = CarlinkFields.bytesField(fields, id) else {
-            throw CarlinkError.badPacket("missing_byte_field")
-        }
-        return b
+    private func bytesField(_ fields: [CarlinkField], _ id: UInt32) -> Data? {
+        CarlinkFields.bytesField(fields, id)
     }
 
     static func rawPublic(_ key: P256.KeyAgreement.PublicKey) -> Data {
