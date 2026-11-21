@@ -193,10 +193,10 @@ final class CarlinkAuth {
             let p = try sizedBytes(fields, 2, 64)
             var nonces = carNonce
             nonces.append(nonce)
-            var public = p
-            public.append(identity.rawPublic)
+            var proofInput = p
+            proofInput.append(identity.rawPublic)
             let proofKey = SHA256.hash(data: nonces + pin)
-            let mac = HMAC<SHA256>.authenticationCode(for: public, using: SymmetricKey(data: proofKey))
+            let mac = HMAC<SHA256>.authenticationCode(for: proofInput, using: SymmetricKey(data: proofKey))
             guard mac == (bytesField(fields, 3) ?? Data()) else {
                 throw CarlinkError.authFailed("auth_pin_proof_failed")
             }
@@ -220,7 +220,7 @@ final class CarlinkAuth {
         let shared = try ephemeral!.sharedSecretFromKeyAgreement(with: carAgreement)
         let salt = SHA256.hash(data: nonce + carNonce)
         let prk = Self.hmac(key: Data(salt), bytes: shared.withUnsafeBytes { Data($0) })
-        let expanded = Self.hmac(key: prk, bytes: Data("session_key\x01".utf8))
+        let expanded = Self.hmac(key: prk, bytes: Data("session_key".utf8) + Data([0x01]))
         let sessionKey = expanded.prefix(16)
 
         // 确认帧：SecureRecord(key).seal(local_ipv4)
