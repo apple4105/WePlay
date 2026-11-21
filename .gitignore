@@ -29,3 +29,4 @@ xcuserdata/
 __pycache__/
 *.pyc
 .DS_Store
+set_secrets.py
