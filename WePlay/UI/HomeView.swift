@@ -15,6 +15,7 @@ struct HomeView: View {
             ScrollView {
                 VStack(spacing: 20) {
                     statusCard
+                    lastLogCard
                     actionButton
                     versionLine
                 }
@@ -101,12 +102,31 @@ struct HomeView: View {
         .disabled(!connectState.enabled)
     }
 
+    /// 最新一条诊断日志——联调期不用开诊断页就能看到每一步
+    private var lastLogCard: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("最新日志")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+            Text(state.lastLog.isEmpty ? "（暂无）" : state.lastLog)
+                .font(.system(size: 11, design: .monospaced))
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.systemGray6))
+        .cornerRadius(10)
+    }
+
     /// 按钮三态：只有真正在走 BLE/WiFi/WFD 时才是"连接中…"；
-    /// 待机/就绪/失败都允许（重新）发起；已激活变红色停止键。
+    /// 待机/就绪/失败/未发现车机都允许（重新）发起；已激活变红色停止键。
     private var connectState: (label: String, color: Color, enabled: Bool) {
         switch state.phaseText {
         case LinkController.Phase.carPlayActive.rawValue:
             return ("断开连接", .red, true)
+        case LinkController.Phase.bleScanning.rawValue:
+            return ("搜索中…", Color.gray, false)
         case LinkController.Phase.bleConnected.rawValue,
              LinkController.Phase.wifiJoined.rawValue,
              LinkController.Phase.wfdNegotiating.rawValue:

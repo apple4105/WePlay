@@ -36,6 +36,9 @@ final class LinkBootstrap: NSObject {
     /// 自己的蓝牙 MAC（PhoneRequest.mac 要用；取不到就填占位并告警）
     private var selfMAC: String = "02:00:00:00:00:00"
 
+    /// 诊断期：每个周围设备只记一次，避免 AllowDuplicates 刷屏
+    private var loggedPeripherals = Set<UUID>()
+
     override init() {
         super.init()
         central = CBCentralManager(delegate: self, queue: nil)
@@ -43,14 +46,16 @@ final class LinkBootstrap: NSObject {
 
     // MARK: - 公开动作
 
-    /// 开始扫描（central 上电后自动调用）
+    /// 开始扫描（central 上电后自动调用）。
+    /// 诊断期**不按服务 UUID 过滤**：把周围所有广播记下来——车机广播若不带
+    /// ICCOA 服务 UUID 也能看见，命中判断在 didDiscover 里做。
     func startScanning() {
         guard central.state == .poweredOn else {
             onLog?("[link] 蓝牙未就绪（\(central.state.rawValue)），等回调")
             return
         }
-        onLog?("[link] 开始扫描 \(Link.serviceUUID)")
-        central.scanForPeripherals(withServices: [Link.serviceUUID], options: [
+        onLog?("[link] 开始全量扫描（命中条件：ICCOA 服务或 DIRECT- 名称）")
+        central.scanForPeripherals(withServices: nil, options: [
             CBCentralManagerScanOptionAllowDuplicatesKey: true
         ])
     }
@@ -63,6 +68,7 @@ final class LinkBootstrap: NSObject {
         peripheral = nil
         phoneCharacteristic = nil
         headUnitCharacteristic = nil
+        loggedPeripherals.removeAll()
     }
 
     /// 用户在 UI 里输入了配对码后调用（具体怎么用待真机确认）
@@ -113,13 +119,24 @@ extension LinkBootstrap: CBCentralManagerDelegate {
     ) {
         let name = advertisementData[CBAdvertisementDataLocalNameKey] as? String
             ?? peripheral.name ?? "(无名)"
-        onLog?("[link] 发现对端：\(name)  RSSI \(RSSI)")
+        let serviceUUIDs = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
+        let hasService = serviceUUIDs.contains(Link.serviceUUID)
+        let looksLikeCar = hasService || name.hasPrefix("DIRECT-")
 
-        // 第一个就是它（对端只会广播一个 ICCOA 服务）；停扫描去连
-        central.stopScan()
-        self.peripheral = peripheral
-        peripheral.delegate = self
-        central.connect(peripheral, options: nil)
+        if looksLikeCar {
+            onLog?("[link] ✅ 发现车机：\(name) RSSI \(RSSI) 服务=\(serviceUUIDs.map { $0.uuidString })")
+            central.stopScan()
+            loggedPeripherals.removeAll()
+            self.peripheral = peripheral
+            peripheral.delegate = self
+            central.connect(peripheral, options: nil)
+            return
+        }
+
+        // 其余设备每个只记一次，避免刷屏
+        if loggedPeripherals.insert(peripheral.identifier).inserted {
+            onLog?("[link] 周围设备：\(name) RSSI \(RSSI) 服务 \(serviceUUIDs.count) 个")
+        }
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {

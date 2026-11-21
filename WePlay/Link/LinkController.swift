@@ -18,10 +18,12 @@ import CryptoKit
 /// ## 每一步的回调都汇到 Diagnostics
 ///
 /// 任何一步出问题，诊断报告里都能看到最后停在哪一行。
-/// SwiftUI 主页订阅的轻量状态桥——只在主线程写 phaseText。
+/// SwiftUI 主页订阅的轻量状态桥——只在主线程写。
 final class PipelineState: ObservableObject {
     static let shared = PipelineState()
     @Published var phaseText: String = "未启动"
+    /// 最新一条诊断日志（主页直接可见，不用开诊断页）
+    @Published var lastLog: String = ""
 }
 
 final class LinkController {
@@ -52,6 +54,8 @@ final class LinkController {
         case identityLoaded = "身份已装载"
         case transportReady = "虚拟 accessory 就绪"
         case transportFailed = "虚拟 accessory 启动失败"
+        case bleScanning = "正在搜索车机…"
+        case carNotFound = "未发现车机（确认车机已开投屏）"
         case bleConnected = "BLE 已连车机"
         case wifiJoined = "已加入车机网络"
         case wfdNegotiating = "WFD 协商中"
@@ -267,14 +271,15 @@ final class LinkController {
         }
 
         bleBootstrap.startScanning()
+        phase = .bleScanning
 
         let timeout = DispatchWorkItem { [weak self] in
-            guard let self, self.cachedReply == nil, self.phase != .idle else { return }
-            diag.warn("BLE", "12 秒未发现车机广播——车机可能不在附近（熄火/未开投屏）")
+            guard let self, self.cachedReply == nil, self.phase == .bleScanning else { return }
+            diag.warn("BLE", "12 秒未发现车机广播——车机可能不在附近（熄火/未开投屏），或广播不带 ICCOA 服务（看诊断里『周围设备』清单）")
             diag.log("管线", "停止扫描。车机就绪后再按「连接车机」")
             self.bleBootstrap?.stop()
             self.bleBootstrap = nil
-            self.phase = .transportReady
+            self.phase = .carNotFound
         }
         bleTimeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: timeout)
