@@ -148,11 +148,17 @@ final class LinkController {
             Diagnostics.shared.hex("传输", "← iPhone", data)
             self?.linkParser.append(data)
         }
-        transport.onFailure = { msg in
+        transport.onFailure = { [weak self] msg in
             diag.error("传输", msg)
+            // 私有框架初始化失败是致命的——把失败也显示到状态卡上
+            self?.phase = .transportFailed
         }
 
-        transport.start()
+        // 私有框架加载 + ObjC runtime 调用不能占主线程（dlopen 可能阻塞），
+        // 放后台队列；回调里都有主线程跳转
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.transport.start()
+        }
     }
 
     // MARK: - iAP2 消息收发

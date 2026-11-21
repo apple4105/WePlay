@@ -69,10 +69,11 @@ jobs:
 
       - name: Package IPA
         run: |
+          IPA="WePlay-0.0.1-b${{ github.run_number }}.ipa"
           mkdir -p build/Payload
           cp -R "build/WePlay.xcarchive/Products/Applications/WePlay.app" build/Payload/
-          (cd build && zip -qry WePlay-unsigned.ipa Payload)
-          shasum -a 256 build/WePlay-unsigned.ipa
+          (cd build && zip -qry "$IPA" Payload)
+          shasum -a 256 "build/$IPA"
 
       - name: Self-test
         run: |
@@ -81,7 +82,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: WePlay-unsigned-ipa
-          path: build/WePlay-unsigned.ipa
+          name: WePlay-0.0.1-b${{ github.run_number }}
+          path: build/WePlay-0.0.1-b${{ github.run_number }}.ipa
           # 产物含 MFi 身份文件：1 天自动删除，缩小公开暴露窗口；测试期手动下载即可
           retention-days: 1

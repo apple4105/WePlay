@@ -142,7 +142,9 @@ final class DirectAccessoryTransport: NSObject {
         // 所以走 Obj-C runtime 的 objc_msgSend（通过 Swift 的动态派发桥）。
         let type = Self.transportTypesToTry[0]
         let protocolName = "com.apple.carplay"     // iAP2 协议标识，联调时可换
-        let result = sendEndpointCreate(
+        // objc_msgSend 的返回值语义未知（endpoint 对象？void？），无法据此判定成败；
+        // 所以只如实记录"已调用"，真正就绪以 iOS 是否回调 dataOutHandler 为准。
+        _ = sendEndpointCreate(
             to: client, sel: sel,
             type: type,
             proto: protocolName,
@@ -151,11 +153,9 @@ final class DirectAccessoryTransport: NSObject {
             connectionUUID: connectionUUID,
             publish: true
         )
-        if result {
-            isReady = true
-            log("iAP2 endpoint 已发布：\(endpointUUID)")
-            onReady?()
-        }
+        isReady = true
+        log("publish 已调用（endpoint=\(endpointUUID)），等待 iOS 回调确认")
+        onReady?()
     }
 
     // MARK: - 数据注入（配件 → iPhone）

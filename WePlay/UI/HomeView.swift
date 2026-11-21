@@ -84,22 +84,36 @@ struct HomeView: View {
 
     private var actionButton: some View {
         Button {
-            if state.phaseText == LinkController.Phase.carPlayActive.rawValue {
+            if connectState.label == "断开连接" {
                 controller.stop()
             } else {
                 controller.connectToCar()
             }
         } label: {
-            Text(state.phaseText == LinkController.Phase.carPlayActive.rawValue ? "断开连接" :
-                 state.phaseText == LinkController.Phase.idle.rawValue ? "连接车机" : "连接中…")
+            Text(connectState.label)
                 .font(.headline)
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 14)
-                .background(state.phaseText == LinkController.Phase.carPlayActive.rawValue ? Color.red : Color.blue)
+                .background(connectState.color)
                 .cornerRadius(12)
         }
-        .disabled(state.phaseText != LinkController.Phase.idle.rawValue && state.phaseText != LinkController.Phase.carPlayActive.rawValue)
+        .disabled(!connectState.enabled)
+    }
+
+    /// 按钮三态：只有真正在走 BLE/WiFi/WFD 时才是"连接中…"；
+    /// 待机/就绪/失败都允许（重新）发起；已激活变红色停止键。
+    private var connectState: (label: String, color: Color, enabled: Bool) {
+        switch state.phaseText {
+        case LinkController.Phase.carPlayActive.rawValue:
+            return ("断开连接", .red, true)
+        case LinkController.Phase.bleConnected.rawValue,
+             LinkController.Phase.wifiJoined.rawValue,
+             LinkController.Phase.wfdNegotiating.rawValue:
+            return ("连接中…", Color.gray, false)
+        default:
+            return ("连接车机", .blue, true)
+        }
     }
 
     /// 版本行——真机上区分装的是哪个构建
