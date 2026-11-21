@@ -136,7 +136,7 @@ struct HomeView: View {
                     .foregroundColor(.white)
             } else {
                 VStack(spacing: 8) {
-                    Image(systemName: v.icon)
+                    Image(systemName: v.icon ?? "circle")
                         .font(.system(size: 44, weight: .light))
                         .foregroundColor(v.ring == .gray ? .white : v.ring)
                     Text(v.word)
