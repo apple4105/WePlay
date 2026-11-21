@@ -207,7 +207,7 @@ private var msgSendImpl: IMP?
 
 func sendEndpointCreate(
     to client: AnyObject, sel: Selector, type: Int,
-    protocol: String, identifier: String,
+    proto: String, identifier: String,
     handler: AnyObject, connectionUUID: String, publish: Bool
 ) -> Bool {
     // objc_msgSend(id self, SEL op, ...) 的多参调用在 Swift 里
@@ -219,7 +219,7 @@ func sendEndpointCreate(
         to: (@convention(c) (AnyObject, Selector, Int, NSString, NSString,
                             AnyObject, NSString, Bool) -> AnyObject?).self
     )
-    _ = fn(client, sel, type, protocol as NSString,
+    _ = fn(client, sel, type, proto as NSString,
            identifier as NSString, handler, connectionUUID as NSString, publish)
     return true
 }
