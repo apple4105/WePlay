@@ -49,8 +49,7 @@ struct WiFiJoiner {
         let configuration = NEHotspotConfiguration(
             ssid: ssid,
             passphrase: psk,
-            isWEP: false,
-            joinOnce: joinOnce
+            isWEP: false
         )
         configuration.hidden = false
 

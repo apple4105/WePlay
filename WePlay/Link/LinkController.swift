@@ -39,17 +39,3 @@ final class LinkController {
         return try authenticator.respond(toChallenge: challenge)
     }
 }
-
-enum LinkError: Error, CustomStringConvertible {
-    case identityNotLoaded
-    case notImplemented(String)
-
-    var description: String {
-        switch self {
-        case .identityNotLoaded:
-            return "配件身份未装载"
-        case .notImplemented(let what):
-            return "\(what) 尚未实现（按计划推进中）"
-        }
-    }
-}

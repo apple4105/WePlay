@@ -96,6 +96,8 @@ enum Link {
 }
 
 enum LinkError: Error, CustomStringConvertible {
+    case identityNotLoaded
+    case notImplemented(String)
     case payloadTooLarge(Int)
     case badType(Int)
     case badFrequency(Int)
@@ -106,6 +108,8 @@ enum LinkError: Error, CustomStringConvertible {
 
     var description: String {
         switch self {
+        case .identityNotLoaded: return "配件身份未装载"
+        case .notImplemented(let w): return "\(w) 尚未实现"
         case .payloadTooLarge(let n): return "载荷超限：\(n) B"
         case .badType(let t): return "未知消息变体 type=\(t)（应 1001/1002）"
         case .badFrequency(let f): return "频段越界：\(f)"
