@@ -18,6 +18,10 @@ targets:
     # 源码 + 资源（.cer/.x963 需要进 Copy Bundle Resources，App 运行时从 bundle 读）
     sources:
       - path: WePlay
+      - path: WePlay/Resources/leaf.cer
+        buildPhase: resources
+      - path: WePlay/Resources/private.x963
+        buildPhase: resources
 
     info:
       path: WePlay/App/Info.plist
