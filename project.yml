@@ -22,6 +22,7 @@ targets:
         buildPhase: resources
       - path: WePlay/Resources/private.x963
         buildPhase: resources
+      - path: WePlay/Resources/Assets.xcassets
 
     info:
       path: WePlay/App/Info.plist
@@ -54,6 +55,7 @@ targets:
         PRODUCT_NAME: WePlay
         PRODUCT_BUNDLE_IDENTIFIER: com.weplay.app
         INFOPLIST_FILE: WePlay/App/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_VERSION: "5.0"
         IPHONEOS_DEPLOYMENT_TARGET: "16.0"
         TARGETED_DEVICE_FAMILY: "1,2"           # iPhone + iPad
