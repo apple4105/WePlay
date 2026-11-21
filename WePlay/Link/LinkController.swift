@@ -51,6 +51,7 @@ final class LinkController {
         case idle = "未启动"
         case identityLoaded = "身份已装载"
         case transportReady = "虚拟 accessory 就绪"
+        case transportFailed = "虚拟 accessory 启动失败"
         case bleConnected = "BLE 已连车机"
         case wifiJoined = "已加入车机网络"
         case wfdNegotiating = "WFD 协商中"
@@ -60,6 +61,8 @@ final class LinkController {
     private(set) var phase: Phase = .idle {
         didSet {
             Diagnostics.shared.log("状态", "→ \(phase.rawValue)")
+            // UI 直接同步——不依赖订阅时机，onAppear 前发生的状态迁移也能显示
+            DispatchQueue.main.async { PipelineState.shared.phaseText = phase.rawValue }
             onPhaseChanged?(phase)
         }
     }
@@ -106,8 +109,10 @@ final class LinkController {
 
         transport = DirectAccessoryTransport()
         transport.onLog = { diag.log("传输", $0) }
-        transport.onFailure = { msg in
+        transport.onFailure = { [weak self] msg in
             diag.error("传输", msg)
+            // 私有框架初始化失败是致命的——把失败也显示到状态卡上
+            self?.phase = .transportFailed
         }
         transport.onReady = { [weak self] in
             guard let self else { return }

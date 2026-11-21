@@ -45,6 +45,13 @@ jobs:
           brew install xcodegen
           xcodegen generate
 
+      # 构建号 = run number，让真机上能区分装的是哪一次构建
+      - name: Stamp version
+        run: |
+          plutil -replace CFBundleVersion -string "${{ github.run_number }}" WePlay/App/Info.plist
+          plutil -replace CFBundleShortVersionString -string "0.0.1" WePlay/App/Info.plist
+          plutil -p WePlay/App/Info.plist | grep -E "Version"
+
       - name: Archive
         run: |
           set -o pipefail

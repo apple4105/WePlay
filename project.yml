@@ -27,8 +27,8 @@ targets:
       path: WePlay/App/Info.plist
       properties:
         CFBundleDisplayName: WePlay
-        CFBundleShortVersionString: "0.1"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "0.0.1"
+        CFBundleVersion: "1"   # CI 会用 plutil 覆盖为 run number
 
     settings:
       base:

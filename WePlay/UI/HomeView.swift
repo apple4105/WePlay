@@ -16,6 +16,7 @@ struct HomeView: View {
                 VStack(spacing: 20) {
                     statusCard
                     actionButton
+                    versionLine
                 }
                 .padding(.horizontal, 16)
             }
@@ -41,9 +42,6 @@ struct HomeView: View {
             }
             .onAppear {
                 controller.start()
-                controller.onPhaseChanged = { p in
-                    DispatchQueue.main.async { state.phaseText = p.rawValue }
-                }
             }
         }
     }
@@ -52,7 +50,8 @@ struct HomeView: View {
         VStack(spacing: 8) {
             HStack(spacing: 6) {
                 Circle()
-                    .fill(state.phaseText.contains("CarPlay") ? Color.green : Color.orange)
+                    .fill(state.phaseText.contains("CarPlay") ? Color.green :
+                          state.phaseText.contains("失败") ? Color.red : Color.orange)
                     .frame(width: 10, height: 10)
                 Text(state.phaseText)
                     .font(.headline)
@@ -101,5 +100,14 @@ struct HomeView: View {
                 .cornerRadius(12)
         }
         .disabled(state.phaseText != LinkController.Phase.idle.rawValue && state.phaseText != LinkController.Phase.carPlayActive.rawValue)
+    }
+
+    /// 版本行——真机上区分装的是哪个构建
+    private var versionLine: some View {
+        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        return Text("v\(v) · 构建 \(b)")
+            .font(.system(size: 11))
+            .foregroundColor(.secondary)
     }
 }

@@ -35,7 +35,12 @@ struct SettingsView: View {
                 }
 
                 Section("关于") {
-                    HStack { Text("版本"); Spacer(); Text("0.1") }
+                    HStack {
+                        Text("版本")
+                        Spacer()
+                        Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?") (构建 \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))")
+                            .foregroundColor(.secondary)
+                    }
                     HStack { Text("目标系统"); Spacer(); Text("iOS 16.0+") }
                     HStack { Text("投屏协议"); Spacer(); Text("WFD 1.0") }
                 }
