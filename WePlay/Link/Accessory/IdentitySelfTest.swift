@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 ///  身份自检工具（开发用，不参与产品逻辑）。
 ///

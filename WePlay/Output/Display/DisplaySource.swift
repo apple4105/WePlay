@@ -73,7 +73,7 @@ final class DisplaySource {
         state = .connecting
         onLog?("[Display] 连接 rtsp://\(host):\(port)/wfd1.0")
 
-        let transport = transport ?? TCPTransport(host: host, port: port)
+        var transport = transport ?? TCPTransport(host: host, port: port)
         self.connection = transport
         transport.onData = { [weak self] data in self?.handleReceived(data) }
         transport.onError = { [weak self] error in

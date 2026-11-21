@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import CoreBluetooth
 
 /// 显示端的 BLE 引导：扫描 → 连接 → 拿入网凭证。

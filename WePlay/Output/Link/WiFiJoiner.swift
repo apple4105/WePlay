@@ -18,7 +18,7 @@ import NetworkExtension
 ///
 /// 两条都实现，用 `useHotspotConfiguration` 开关切；没 entitlement 时
 /// 自动 fallback 到手动（把凭证显示给用户）。
-struct WiFiJoiner {
+final class WiFiJoiner {
 
     var onLog: ((String) -> Void)?
 
