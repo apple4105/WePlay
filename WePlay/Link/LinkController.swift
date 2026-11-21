@@ -22,8 +22,6 @@ import CryptoKit
 final class PipelineState: ObservableObject {
     static let shared = PipelineState()
     @Published var phaseText: String = "未启动"
-    /// 最新一条诊断日志（主页直接可见，不用开诊断页）
-    @Published var lastLog: String = ""
 }
 
 final class LinkController {
@@ -283,6 +281,16 @@ final class LinkController {
         }
         bleTimeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: timeout)
+    }
+
+    /// 用户在扫描过程中按"停止"：取消扫描与超时，回到就绪待机。
+    func stopScan() {
+        bleTimeout?.cancel()
+        bleTimeout = nil
+        bleBootstrap?.stop()
+        bleBootstrap = nil
+        phase = .transportReady
+        Diagnostics.shared.log("管线", "已停止扫描")
     }
 
     /// 加入车机网络。NEHotspot 失败自动重试一次；系统对记住的网络通常会自己回连。

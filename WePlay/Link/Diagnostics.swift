@@ -65,8 +65,6 @@ final class Diagnostics {
         let line = "[\(time)] [\(level)] [\(module)] \(message)"
         DispatchQueue.main.async { [weak self] in
             self?.onUpdate?(line)
-            // 同步给主页状态桥：最新一条日志直接显示在状态卡下
-            PipelineState.shared.lastLog = line
         }
     }
 

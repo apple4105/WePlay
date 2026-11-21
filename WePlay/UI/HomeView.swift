@@ -15,7 +15,6 @@ struct HomeView: View {
             ScrollView {
                 VStack(spacing: 20) {
                     statusCard
-                    lastLogCard
                     actionButton
                     versionLine
                 }
@@ -85,9 +84,12 @@ struct HomeView: View {
 
     private var actionButton: some View {
         Button {
-            if connectState.label == "断开连接" {
+            switch connectState.action {
+            case .stop:
                 controller.stop()
-            } else {
+            case .stopScan:
+                controller.stopScan()
+            case .connect:
                 controller.connectToCar()
             }
         } label: {
@@ -102,39 +104,26 @@ struct HomeView: View {
         .disabled(!connectState.enabled)
     }
 
-    /// 最新一条诊断日志——联调期不用开诊断页就能看到每一步
-    private var lastLogCard: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("最新日志")
-                .font(.system(size: 10))
-                .foregroundColor(.secondary)
-            Text(state.lastLog.isEmpty ? "（暂无）" : state.lastLog)
-                .font(.system(size: 11, design: .monospaced))
-                .lineLimit(3)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(.systemGray6))
-        .cornerRadius(10)
-    }
-
-    /// 按钮三态：只有真正在走 BLE/WiFi/WFD 时才是"连接中…"；
-    /// 待机/就绪/失败/未发现车机都允许（重新）发起；已激活变红色停止键。
-    private var connectState: (label: String, color: Color, enabled: Bool) {
+    /// 按钮四态（照 OpenXPlay 的模式：过程态都能停）：
+    /// 待机/就绪/失败/未发现车机 = 蓝"连接车机"；搜索中 = 红"停止"（可取消）；
+    /// 握手进行中 = 灰"连接中…"；已激活 = 红"断开连接"。
+    private var connectState: (label: String, color: Color, enabled: Bool,
+                               action: HomeView.ButtonAction) {
         switch state.phaseText {
         case LinkController.Phase.carPlayActive.rawValue:
-            return ("断开连接", .red, true)
+            return ("断开连接", .red, true, .stop)
         case LinkController.Phase.bleScanning.rawValue:
-            return ("搜索中…", Color.gray, false)
+            return ("停止", .red, true, .stopScan)
         case LinkController.Phase.bleConnected.rawValue,
              LinkController.Phase.wifiJoined.rawValue,
              LinkController.Phase.wfdNegotiating.rawValue:
-            return ("连接中…", Color.gray, false)
+            return ("连接中…", Color.gray, false, .connect)
         default:
-            return ("连接车机", .blue, true)
+            return ("连接车机", .blue, true, .connect)
         }
     }
+
+    private enum ButtonAction { case connect, stopScan, stop }
 
     /// 版本行——真机上区分装的是哪个构建
     private var versionLine: some View {
