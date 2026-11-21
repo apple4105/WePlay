@@ -42,21 +42,21 @@ jobs:
           set -o pipefail
           xcodebuild archive \
             -project weplay.xcodeproj \
-            -scheme weplay \
+            -scheme WePlay \
             -configuration Release \
             -destination 'generic/platform=iOS' \
-            -archivePath build/weplay.xcarchive \
+            -archivePath build/WePlay.xcarchive \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             DEVELOPMENT_TEAM="" \
-            | xcpretty || true
+            | xcpretty
 
       - name: Package IPA
         run: |
           mkdir -p build/Payload
-          cp -R build/weplay.xcarchive/Products/Applications/weplay.app build/Payload/
-          (cd build && zip -qry weplay-unsigned.ipa Payload)
+          cp -R build/WePlay.xcarchive/Products/Applications/WePlay.app build/Payload/
+          (cd build && zip -qry WePlay-unsigned.ipa Payload)
           shasum -a 256 build/weplay-unsigned.ipa
 
       - name: Self-test
@@ -66,6 +66,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: weplay-unsigned-ipa
-          path: build/weplay-unsigned.ipa
+          name: WePlay-unsigned-ipa
+          path: build/WePlay-unsigned.ipa
           retention-days: 14
