@@ -57,34 +57,53 @@ struct HomeView: View {
 
     // MARK: - 状态视觉模型（OpenXPlay 式：圆环 + 中心内容 + 状态词）
 
-    private var visual: (progress: Double?, ring: Color, icon: String,
-                         center: String?, word: String, sentence: String) {
+    private struct Hero {
+        let progress: Double?
+        let ring: Color
+        let icon: String?
+        let center: String?
+        let word: String
+        let sentence: String
+    }
+
+    private var visual: Hero {
         switch state.phaseText {
         case LinkController.Phase.idle.rawValue:
-            return (0, .gray, "circle", nil, "未启动", "按下面的「启动」开始连接车机。")
+            return Hero(progress: 0, ring: .gray, icon: "circle", center: nil,
+                        word: "未启动", sentence: "按下面的「启动」开始连接车机。")
         case LinkController.Phase.identityLoaded.rawValue:
-            return (0.1, .green, "key.fill", nil, "准备中", "配件身份已装载，正在启动虚拟 accessory……")
+            return Hero(progress: 0.1, ring: .green, icon: "key.fill", center: nil,
+                        word: "准备中", sentence: "配件身份已装载，正在启动虚拟 accessory……")
         case LinkController.Phase.transportReady.rawValue:
-            return (0.1, .green, "car.fill", nil, "就绪", "已就绪。按「启动」连接车机。")
+            return Hero(progress: 0.1, ring: .green, icon: "car.fill", center: nil,
+                        word: "就绪", sentence: "已就绪。按「启动」连接车机。")
         case LinkController.Phase.transportFailed.rawValue:
-            return (nil, .red, "exclamationmark.triangle.fill", nil, "启动失败",
-                    "虚拟 accessory 初始化失败。详见「诊断」里的 [Transport] 日志。")
+            return Hero(progress: nil, ring: .red, icon: "exclamationmark.triangle.fill",
+                        center: nil, word: "启动失败",
+                        sentence: "虚拟 accessory 初始化失败。详见「诊断」里的 [Transport] 日志。")
         case LinkController.Phase.bleScanning.rawValue:
-            return (nil, .orange, "iPhone.radiowaves.left.and.right", nil, "搜索中",
-                    "正在搜索车机的蓝牙广播……请确认车机已打开 CarLink。")
+            return Hero(progress: nil, ring: .orange, icon: "iPhone.radiowaves.left.and.right",
+                        center: nil, word: "搜索中",
+                        sentence: "正在搜索车机的蓝牙广播……请确认车机已打开 CarLink。")
         case LinkController.Phase.carNotFound.rawValue:
-            return (0, .orange, "questionmark.circle", nil, "未发现车机",
-                    "12 秒内没有发现车机广播。请确认车机已打开 CarLink 后重试。")
+            return Hero(progress: 0, ring: .orange, icon: "questionmark.circle", center: nil,
+                        word: "未发现车机",
+                        sentence: "12 秒内没有发现车机广播。请确认车机已打开 CarLink 后重试。")
         case LinkController.Phase.bleConnected.rawValue:
-            return (0.2, .green, nil, "20%", "连接车机", "已连上车机蓝牙，正在拿取网络凭证……")
+            return Hero(progress: 0.2, ring: .green, icon: nil, center: "20%",
+                        word: "连接车机", sentence: "已连上车机蓝牙，正在拿取网络凭证……")
         case LinkController.Phase.wifiJoined.rawValue:
-            return (0.45, .green, nil, "45%", "加入网络", "已加入车机网络。")
+            return Hero(progress: 0.45, ring: .green, icon: nil, center: "45%",
+                        word: "加入网络", sentence: "已加入车机网络。")
         case LinkController.Phase.wfdNegotiating.rawValue:
-            return (0.7, .green, nil, "70%", "等待车机连接", "与车机的投屏会话协商中……")
+            return Hero(progress: 0.7, ring: .green, icon: nil, center: "70%",
+                        word: "等待车机连接", sentence: "与车机的投屏会话协商中……")
         case LinkController.Phase.carPlayActive.rawValue:
-            return (1, .green, "checkmark", nil, "CarPlay 已激活", "正在向车机投屏。")
+            return Hero(progress: 1, ring: .green, icon: "checkmark", center: nil,
+                        word: "CarPlay 已激活", sentence: "正在向车机投屏。")
         default:
-            return (0, .gray, "circle", nil, state.phaseText, "")
+            return Hero(progress: 0, ring: .gray, icon: "circle", center: nil,
+                        word: state.phaseText, sentence: "")
         }
     }
 
