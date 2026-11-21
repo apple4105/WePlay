@@ -29,7 +29,7 @@ struct WiFiJoiner {
     var onJoined: ((String) -> Void)?
 
     /// 需要用户手动加入（把 SSID/PSK 显示出来）
-    var onManualJoinRequired: ((ssid: String, psk: String) -> Void)?
+    var onManualJoinRequired: ((_ ssid: String, _ psk: String) -> Void)?
 
     /// 失败
     var onFailure: ((Error) -> Void)?
@@ -64,7 +64,7 @@ struct WiFiJoiner {
                 if nsError.domain == NEHotspotConfigurationErrorDomain,
                    nsError.code == NEHotspotConfigurationError.invalid.rawValue {
                     self.onLog?("[WiFi] 可能是没有 entitlement，转手动加入")
-                    self.onManualJoinRequired?((ssid, psk))
+                    self.onManualJoinRequired?(ssid, psk)
                     return
                 }
                 self.onFailure?(error)
