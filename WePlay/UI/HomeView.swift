@@ -1,15 +1,14 @@
 import SwiftUI
+import UIKit
 
-/// 主页：状态卡片 + 连接按钮 + 简要日志。
 struct HomeView: View {
-    @State private var phase: LinkController.Phase = .idle
-    @State private var statusText = "未启动"
+    @ObservedObject private var state = PipelineState.shared
     @State private var showSettings = false
     @State private var showDiagnostics = false
     @State private var showPinInput = false
     @State private var pinCode = ""
 
-    private let controller = (UIApplication.shared.delegate as! AppDelegate).carPlay
+    private let controller = LinkController.shared
 
     var body: some View {
         NavigationStack {
@@ -17,9 +16,6 @@ struct HomeView: View {
                 VStack(spacing: 20) {
                     statusCard
                     actionButton
-                    if phase.rawValue != LinkController.Phase.idle.rawValue {
-                        stepIndicator
-                    }
                 }
                 .padding(.horizontal, 16)
             }
@@ -38,44 +34,37 @@ struct HomeView: View {
             .sheet(isPresented: $showSettings) { SettingsView() }
             .alert("输入配对码", isPresented: $showPinInput) {
                 TextField("车机屏幕上的配对码", text: $pinCode)
-                Button("确认") { controller?.bleBootstrap?.submitPinCode(pinCode) }
+                Button("确认") { controller.bleBootstrap?.submitPinCode(pinCode) }
                 Button("取消", role: .cancel) {}
             } message: {
                 Text("请在车机屏幕上查看当前配对码")
             }
             .onAppear {
-                controller?.onPhaseChanged = { p in
-                    DispatchQueue.main.async {
-                        phase = p
-                        statusText = p.rawValue
-                    }
+                controller.start()
+                controller.onPhaseChanged = { p in
+                    DispatchQueue.main.async { state.phaseText = p.rawValue }
                 }
-                controller?.start()
             }
         }
     }
 
-    // MARK: - 状态卡片
-
     private var statusCard: some View {
         VStack(spacing: 8) {
-            // 状态圆点
             HStack(spacing: 6) {
                 Circle()
-                    .fill(phase == .carPlayActive ? Color.green : Color.orange)
+                    .fill(state.phaseText.contains("CarPlay") ? Color.green : Color.orange)
                     .frame(width: 10, height: 10)
-                Text(statusText)
+                Text(state.phaseText)
                     .font(.headline)
             }
 
-            // 各阶段步骤指示
             VStack(alignment: .leading, spacing: 6) {
-                stepRow("MFi 身份", done: phase.rawValue >= LinkController.Phase.identityLoaded.rawValue)
-                stepRow("虚拟 accessory", done: phase.rawValue >= LinkController.Phase.transportReady.rawValue)
-                stepRow("BLE 连接车机", done: phase.rawValue >= LinkController.Phase.bleConnected.rawValue)
-                stepRow("加入车机网络", done: phase.rawValue >= LinkController.Phase.wifiJoined.rawValue)
-                stepRow("WFD 协商", done: phase.rawValue >= LinkController.Phase.wfdNegotiating.rawValue)
-                stepRow("CarPlay 投屏", done: phase == .carPlayActive)
+                stepRow("MFi 身份", done: state.phaseText != LinkController.Phase.idle.rawValue)
+                stepRow("虚拟 accessory", done: state.phaseText != LinkController.Phase.idle.rawValue && state.phaseText != LinkController.Phase.identityLoaded.rawValue)
+                stepRow("BLE 连接车机", done: state.phaseText == LinkController.Phase.bleConnected.rawValue)
+                stepRow("加入车机网络", done: state.phaseText == LinkController.Phase.wifiJoined.rawValue)
+                stepRow("WFD 协商", done: state.phaseText == LinkController.Phase.wfdNegotiating.rawValue)
+                stepRow("CarPlay 投屏", done: state.phaseText == LinkController.Phase.carPlayActive.rawValue)
             }
             .font(.system(size: 13))
             .foregroundColor(.secondary)
@@ -94,47 +83,23 @@ struct HomeView: View {
         }
     }
 
-    // MARK: - 按钮
-
     private var actionButton: some View {
         Button {
-            handleAction()
+            if state.phaseText == LinkController.Phase.carPlayActive.rawValue {
+                controller.stop()
+            } else {
+                controller.connectToCar()
+            }
         } label: {
-            Text(buttonLabel)
+            Text(state.phaseText == LinkController.Phase.carPlayActive.rawValue ? "断开连接" :
+                 state.phaseText == LinkController.Phase.idle.rawValue ? "连接车机" : "连接中…")
                 .font(.headline)
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 14)
-                .background(buttonColor)
+                .background(state.phaseText == LinkController.Phase.carPlayActive.rawValue ? Color.red : Color.blue)
                 .cornerRadius(12)
         }
-        .disabled(phase != .idle && phase != .carPlayActive)
-    }
-
-    private var buttonLabel: String {
-        switch phase {
-        case .idle: return "连接车机"
-        case .carPlayActive: return "断开连接"
-        default: return "连接中…"
-        }
-    }
-
-    private var buttonColor: Color {
-        switch phase {
-        case .idle: return .blue
-        case .carPlayActive: return .red
-        default: return .gray
-        }
-    }
-
-    private func handleAction() {
-        switch phase {
-        case .idle:
-            controller?.connectToCar()
-        case .carPlayActive:
-            controller?.stop()
-        default:
-            break
-        }
+        .disabled(state.phaseText != LinkController.Phase.idle.rawValue && state.phaseText != LinkController.Phase.carPlayActive.rawValue)
     }
 }

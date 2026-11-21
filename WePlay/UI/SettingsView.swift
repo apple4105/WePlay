@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// 设置页：Wi-Fi 加入方式 / 音频路由 / 诊断
 struct SettingsView: View {

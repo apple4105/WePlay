@@ -17,7 +17,15 @@ import Foundation
 /// ## 每一步的回调都汇到 Diagnostics
 ///
 /// 任何一步出问题，诊断报告里都能看到最后停在哪一行。
+/// SwiftUI 主页订阅的轻量状态桥——只在主线程写 phaseText。
+final class PipelineState: ObservableObject {
+    static let shared = PipelineState()
+    @Published var phaseText: String = "未启动"
+}
+
 final class LinkController {
+    static let shared = LinkController()
+
 
     // MARK: - 模块实例
 
@@ -151,7 +159,10 @@ final class LinkController {
                 guard let self else { return }
                 self.phase = .wifiJoined
                 diag.log("管线", "已加入车机网络 \(ssid)")
-                self.startWFD(host: reply.mac, port: UInt16(reply.port))
+                // BLE 只给了 MAC/端口；RTSP 在车机（AP 网关）上，IP 用网关推断
+                let host = self.wifiJoiner.guessGatewayIPv4() ?? "192.168.43.1"
+                diag.log("管线", "车机 IP 推断为 \(host)（MAC=\(reply.mac)）")
+                self.startWFD(host: host, port: UInt16(reply.port))
             }
             self.wifiJoiner.onManualJoinRequired = { (ssid, psk) in
                 diag.warn("WiFi", "需要手动加入：SSID=\(ssid) 密码=\(psk)")

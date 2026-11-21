@@ -80,4 +80,42 @@ final class WiFiJoiner {
         // v1 不依赖它，交由调用方按 Display 连接结果判断。
         nil
     }
+
+    /// 推断车机 IP：车机是 AP（网关），取 en 接口的 IPv4，把末段换成 .1。
+    ///
+    /// BLE 握手只给 MAC/端口，不给 IP。RTSP 端口挂在网关（车机）上，
+    /// 所以加入车机网络后取本机接口所在子网的 .1 即可。
+    /// - Returns: 例如 "192.168.43.1"；没有可用接口时返回 nil
+    func guessGatewayIPv4() -> String? {
+        var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddrPtr) == 0, let first = ifaddrPtr else { return nil }
+        defer { freeifaddrs(ifaddrPtr) }
+
+        var ip: String?
+        var cursor = first
+        while true {
+            let ifa = cursor.pointee
+            if let sa = ifa.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) {
+                let name = String(cString: ifa.ifa_name)
+                if name.hasPrefix("en") {
+                    var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                    if getnameinfo(sa, socklen_t(sa.pointee.sa_len),
+                                   &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
+                        let addr = String(cString: host)
+                        if !addr.hasPrefix("169.254.") && addr != "127.0.0.1" {
+                            ip = addr
+                        }
+                    }
+                }
+            }
+            if let next = ifa.ifa_next { cursor = next } else { break }
+        }
+
+        guard let ip else { return nil }
+        let parts = ip.split(separator: ".")
+        guard parts.count == 4 else { return nil }
+        let gateway = parts[0...2].joined(separator: ".") + ".1"
+        onLog?("[WiFi] 本机 \(ip) → 网关（车机）\(gateway)")
+        return gateway
+    }
 }
