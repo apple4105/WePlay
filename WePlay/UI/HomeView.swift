@@ -43,10 +43,13 @@ struct HomeView: View {
             .sheet(isPresented: $showSettings) { SettingsView() }
             .alert("输入配对码", isPresented: $showPinInput) {
                 TextField("车机屏幕上的配对码", text: $pinCode)
-                Button("确认") { controller.bleBootstrap?.submitPinCode(pinCode) }
+                Button("确认") { controller.submitPin(pinCode) }
                 Button("取消", role: .cancel) {}
             } message: {
                 Text("请在车机屏幕上查看当前配对码")
+            }
+            .onChange(of: state.pinRequired) { required in
+                if required { showPinInput = true }
             }
             .onAppear {
                 controller.start()

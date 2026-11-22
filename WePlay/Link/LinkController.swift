@@ -22,6 +22,8 @@ import CryptoKit
 final class PipelineState: ObservableObject {
     static let shared = PipelineState()
     @Published var phaseText: String = "未启动"
+    /// 车机要求配对码（主页据此弹输入框）
+    @Published var pinRequired = false
 }
 
 final class LinkController {
@@ -320,15 +322,56 @@ final class LinkController {
         wifiJoiner.join(ssid: reply.ssid, psk: reply.psk)
     }
 
-    /// 启动 WFD（RTSP M1-M5）。失败由统一恢复入口按指数退避重试。
+    /// Carlink 会话（认证 + 服务端口编排）。RTSP 由车机拨入后交给 DisplaySource。
+    private var carlinkSession: CarlinkSession?
+
+    /// 加入车机网络后启动 Carlink 会话（认证 → 车机拨入 RTSP → WFD 协商）。
+    /// 失败由统一恢复入口按指数退避重试。
     private func startWFD(_ reply: Link.HeadUnitReply) {
         let diag = Diagnostics.shared
-        diag.log("管线", "── WFD Source ──")
+        diag.log("管线", "── Carlink 会话 ──")
+        carlinkSession?.stop()
 
-        // BLE 只给了 MAC/端口；RTSP 在车机（AP 网关）上，IP 用网关推断
+        // BLE 只给了 MAC/端口；车机 IP 用网关推断
         let host = wifiJoiner?.guessGatewayIPv4() ?? "192.168.43.1"
-        diag.log("管线", "车机 IP 推断为 \(host)（MAC=\(reply.mac)）")
+        let localIP = wifiJoiner?.currentLocalIPv4() ?? "192.168.43.2"
+        diag.log("管线", "车机 \(host) / 本机 \(localIP)（MAC=\(reply.mac)）")
 
+        do {
+            let identity = try CarlinkTrustStore.shared.loadOrCreateIdentity()
+            let session = CarlinkSession(headUnitIP: host, localIP: localIP,
+                                         identity: identity, trust: .shared, pin: nil)
+            carlinkSession = session
+            session.onLog = { diag.log("Carlink", $0) }
+            session.onState = { st in
+                diag.log("Carlink", "→ \(st.rawValue)")
+            }
+            session.onPinRequired = {
+                diag.warn("Carlink", "车机要求配对码")
+                PipelineState.shared.pinRequired = true
+            }
+            session.onError = { [weak self] error in
+                diag.error("Carlink", "\(error)")
+                self?.handleLinkFailure(error)
+            }
+            session.onRtspAccepted = { [weak self] transport in
+                diag.log("管线", "车机已拨入 RTSP → 启动 WFD 协商")
+                self?.startDisplay(with: transport, host: host)
+            }
+            session.onUibcData = { data in
+                Diagnostics.shared.hex("UIBC", "← 车机触摸", data)
+                // v1：UIBC 解析接 TouchRelay 待做
+            }
+            session.start()
+        } catch {
+            diag.error("Carlink", "启动失败：\(error)")
+            handleLinkFailure(error)
+        }
+    }
+
+    /// 车机拨入 RTSP 后，用该连接跑 WFD M1-M5；就绪后发 iAP2 startSession
+    private func startDisplay(with transport: DisplayTransport, host: String) {
+        let diag = Diagnostics.shared
         displaySource = DisplaySource()
         displaySource.onLog = { diag.log("WFD", $0) }
         displaySource.onFailure = { [weak self] error in
@@ -350,8 +393,15 @@ final class LinkController {
             diag.log("管线", "RTP 打包器就绪（视频 \(session.host):\(session.port)）")
             self.sendStartSession()
         }
+        // 窗口模式：不请求全屏（保留车机"返回车机"入口的基础）
+        displaySource.connect(host: host, port: CarlinkSession.Ports.rtsp, transport: transport)
+    }
 
-        displaySource.connect(host: host, port: UInt16(reply.port))
+    /// UI 配对码输入 → Carlink 认证续跑
+    func submitPin(_ code: String) {
+        Diagnostics.shared.log("Carlink", "用户输入配对码（\(code.count) 位）")
+        carlinkSession?.submitPin(code)
+        PipelineState.shared.pinRequired = false
     }
 
     /// WFD 就绪后把媒体会话指向本机 MediaTCPListener（同机回环）
@@ -448,8 +498,11 @@ final class LinkController {
         bleTimeout = nil
         wfdRetry = 0
         bleBootstrap?.stop()
-        displaySource?.stop()   // 会向车机发 TEARDOWN
+        carlinkSession?.stop()
+        carlinkSession = nil
+        displaySource?.stop()
         mediaListener?.stop()
+        PipelineState.shared.pinRequired = false
         phase = .idle
         Diagnostics.shared.log("管线", "已停止（保留 accessory 与车机凭证缓存）")
     }

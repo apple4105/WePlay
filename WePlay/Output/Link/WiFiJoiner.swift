@@ -81,6 +81,32 @@ final class WiFiJoiner {
         nil
     }
 
+    /// 本机在当前 Wi-Fi 网络上的 IPv4（Carlink 认证要上报给车机）
+    func currentLocalIPv4() -> String? {
+        var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddrPtr) == 0, let first = ifaddrPtr else { return nil }
+        defer { freeifaddrs(ifaddrPtr) }
+        var cursor = first
+        while true {
+            let ifa = cursor.pointee
+            if let sa = ifa.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) {
+                let name = String(cString: ifa.ifa_name)
+                if name.hasPrefix("en") {
+                    var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                    if getnameinfo(sa, socklen_t(sa.pointee.sa_len),
+                                   &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
+                        let addr = String(cString: host)
+                        if !addr.hasPrefix("169.254.") && addr != "127.0.0.1" {
+                            return addr
+                        }
+                    }
+                }
+            }
+            if let next = ifa.ifa_next { cursor = next } else { break }
+        }
+        return nil
+    }
+
     /// 推断车机 IP：车机是 AP（网关），取 en 接口的 IPv4，把末段换成 .1。
     ///
     /// BLE 握手只给 MAC/端口，不给 IP。RTSP 端口挂在网关（车机）上，
