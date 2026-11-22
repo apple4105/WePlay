@@ -76,7 +76,7 @@ struct HomeView: View {
                         word: "未启动", sentence: "按下面的「启动」开始连接车机。")
         case LinkController.Phase.identityLoaded.rawValue:
             return Hero(progress: 0.1, ring: .green, icon: "key.fill", center: nil,
-                        word: "准备中", sentence: "配件身份已装载，正在启动虚拟 accessory……")
+                        word: "就绪", sentence: "已就绪。按「启动」搜索并连接车机。")
         case LinkController.Phase.transportReady.rawValue:
             return Hero(progress: 0.1, ring: .green, icon: "car.fill", center: nil,
                         word: "就绪", sentence: "已就绪。按「启动」连接车机。")
