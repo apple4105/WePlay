@@ -120,8 +120,14 @@ final class LinkController {
         }
         transport.onReady = { [weak self] in
             guard let self else { return }
-            self.phase = .transportReady
-            diag.log("管线", "虚拟 accessory 就绪，发送 SYN + identification")
+            // 防覆盖：onReady 异步晚到会把"搜索中"打回"就绪"，按钮变回启动导致二次触发
+            // （0.0.1-b53 真机实锤）。状态只进不退。
+            if self.phase == .identityLoaded || self.phase == .idle || self.phase == .transportFailed {
+                self.phase = .transportReady
+            } else {
+                diag.log("管线", "虚拟 accessory 就绪（管线已推进，保持当前状态）")
+            }
+            diag.log("管线", "发送 SYN + identification")
             // 控制会话先同步（SYN），再报身份
             self.sendRaw(LinkPacket(control: LinkPacket.controlSYN, sequence: 0,
                                     sessionID: LinkPacket.controlSessionID).encode())
