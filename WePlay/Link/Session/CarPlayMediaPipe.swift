@@ -13,7 +13,7 @@ import Network
 final class CarPlayMediaPipe {
 
     private let rtp: RTPPacketizer
-    private let screen = ScreenStream()
+    private let parameterSets = VideoParameterSets()
     private var udp: NWConnection?
     private let targetHost: String
     private let targetPort: UInt16
@@ -70,8 +70,8 @@ final class CarPlayMediaPipe {
     }
 
     private func handleNAL(_ avcc: Data) {
-        // 吸参数集（SPS/PPS → avcC）
-        screen.absorb(nal: avcc)
+        // 吸参数集（SPS/PPS → avcC，供后续 hvcC/DCR 与回放用）
+        parameterSets.absorb(nal: avcc)
 
         guard let annexB = (try? H264AnnexB.convertFromAVCC(avcc)) ?? nil, !annexB.isEmpty else { return }
         nalCount += 1
