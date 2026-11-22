@@ -51,10 +51,11 @@ struct SettingsView: View {
     }
 }
 
-/// 诊断日志页：实时显示所有模块日志，可导出
+/// 诊断日志页：实时显示所有模块日志，可复制
 struct DiagnosticsView: View {
     @Environment(\.dismiss) var dismiss
     @State private var logText = ""
+    @State private var copied = false
 
     var body: some View {
         NavigationStack {
@@ -68,18 +69,24 @@ struct DiagnosticsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("导出") {
-                        let activity = UIActivityViewController(
-                            activityItems: [Diagnostics.shared.exportText()],
-                            applicationActivities: nil
-                        )
-                        UIApplication.shared.connectedScenes
-                            .compactMap { $0 as? UIWindowScene }
-                            .flatMap { $0.windows }
-                            .first { $0.isKeyWindow }?
-                            .rootViewController?
-                            .present(activity, animated: true)
+                    Button("复制") {
+                        UIPasteboard.general.string = Diagnostics.shared.exportText()
+                        copied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            copied = false
+                        }
                     }
+                }
+            }
+            .overlay(alignment: .center) {
+                if copied {
+                    Text("已复制到剪贴板")
+                        .font(.system(size: 14))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.black.opacity(0.8))
+                        .cornerRadius(10)
                 }
             }
             .onAppear {
