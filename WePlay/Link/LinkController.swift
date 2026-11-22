@@ -76,7 +76,9 @@ final class LinkController {
 
     // MARK: - 启动
 
-    /// 完整启动序列（UI 的"开始"按钮调这个）
+    /// 完整启动序列（UI 打开时调）。**不发布虚拟 accessory**——
+    /// 它只在"连接车机"期间存在，否则 iOS 里挂着幽灵 CarPlay 配件，
+    /// OpenXPlay 等其他 CarPlay 会话会被顶掉（0.0.1-b51 实测教训）。
     func start() {
         let diag = Diagnostics.shared
         diag.log("管线", "════ 启动 ════")
@@ -89,9 +91,6 @@ final class LinkController {
             diag.error("管线", "身份装载失败，停止")
             return
         }
-
-        // ── M3: 虚拟 accessory ──
-        startTransport()
 
         // ── M4: 媒体监听提前起好，startSession 时端口已绑定 ──
         startMediaSession()
@@ -236,6 +235,11 @@ final class LinkController {
         let diag = Diagnostics.shared
         diag.log("管线", "── 连接车机 ──")
         wfdRetry = 0
+
+        // 虚拟 accessory 只在连接期间存在（避免幽灵配件顶掉其他 CarPlay 会话）
+        if transport == nil {
+            startTransport()
+        }
 
         // 上次 stop 可能停掉了媒体监听，重新起一个（端口随 startSession 通告给 iPhone）
         startMediaSession()
@@ -426,13 +430,15 @@ final class LinkController {
         }
     }
 
-    /// 结束投屏（保留 accessory 与凭证缓存——再按连接可直接重连）
+    /// 结束投屏（销毁虚拟 accessory，保留凭证缓存——再按连接可直接重连）
     func teardownProjection() {
         carlinkSession?.stop()
         carlinkSession = nil
         displaySource?.stop()
         mediaPipe?.stop()
         mediaPipe = nil
+        transport?.stop()
+        transport = nil
         returnGesture.reset()
         phase = .wifiJoined
     }
@@ -552,8 +558,12 @@ final class LinkController {
         mediaPipe = nil
         pendingMediaConnections.removeAll()
         mediaListener?.stop()
+        // 销毁虚拟 accessory——否则 iOS 里挂着幽灵 CarPlay 配件，
+        // OpenXPlay 等其他 CarPlay 会话会被顶掉（0.0.1-b51 实测教训）
+        transport?.stop()
+        transport = nil
         PipelineState.shared.pinRequired = false
         phase = .idle
-        Diagnostics.shared.log("管线", "已停止（保留 accessory 与车机凭证缓存）")
+        Diagnostics.shared.log("管线", "已停止（保留车机凭证缓存）")
     }
 }
