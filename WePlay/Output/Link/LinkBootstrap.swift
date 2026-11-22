@@ -128,11 +128,18 @@ extension LinkBootstrap: CBCentralManagerDelegate {
         let name = advertisementData[CBAdvertisementDataLocalNameKey] as? String
             ?? peripheral.name ?? "(无名)"
         let serviceUUIDs = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
-        let hasService = serviceUUIDs.contains(Link.serviceUUID)
-        let looksLikeCar = hasService || name.hasPrefix("DIRECT-")
+        // 命中条件（oxp-clink ble.rs）：广播服务=0000fcfb（advertisement）或
+        // 2abcc850（GATT，部分固件直接广播）或名字 DIRECT- 前缀
+        let hasGATTService = serviceUUIDs.contains(Link.serviceUUID)
+        let hasAdvService = serviceUUIDs.contains(Link.vendorUUID)
+        let looksLikeCar = hasGATTService || hasAdvService || name.hasPrefix("DIRECT-")
 
         if looksLikeCar {
-            onLog?("[link] ✅ 发现车机：\(name) RSSI \(RSSI) 服务=\(serviceUUIDs.map { $0.uuidString })")
+            let kind = hasGATTService ? "GATT服务" : hasAdvService ? "广播服务fcfb" : "DIRECT名字"
+            onLog?("[link] ✅ 发现车机（\(kind)）：\(name) RSSI \(RSSI)")
+            if let mfr = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data {
+                Diagnostics.shared.hex("BLE", "厂商数据", mfr)
+            }
             central.stopScan()
             loggedPeripherals.removeAll()
             self.peripheral = peripheral
@@ -141,9 +148,15 @@ extension LinkBootstrap: CBCentralManagerDelegate {
             return
         }
 
-        // 其余设备每个只记一次，避免刷屏
+        // 其余设备每个只记一次，避免刷屏；带厂商数据的记厂商数据 hex
         if loggedPeripherals.insert(peripheral.identifier).inserted {
-            onLog?("[link] 周围设备：\(name) RSSI \(RSSI) 服务 \(serviceUUIDs.count) 个")
+            let svc = serviceUUIDs.map { $0.uuidString }.joined(separator: ",")
+            if let mfr = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data,
+               !mfr.isEmpty {
+                onLog?("[link] 周围设备：\(name) RSSI \(RSSI) 服务[\(svc)] 厂商 \(mfr.prefix(12).map { String(format: "%02x", $0) }.joined())")
+            } else {
+                onLog?("[link] 周围设备：\(name) RSSI \(RSSI) 服务[\(svc)]")
+            }
         }
     }
 
