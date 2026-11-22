@@ -82,7 +82,7 @@ final class WiFiJoiner {
     }
 
     /// 本机在当前 Wi-Fi 网络上的 IPv4（Carlink 认证要上报给车机）
-    func currentLocalIPv4() -> String? {
+    static func currentLocalIPv4() -> String? {
         var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddrPtr) == 0, let first = ifaddrPtr else { return nil }
         defer { freeifaddrs(ifaddrPtr) }
@@ -112,7 +112,7 @@ final class WiFiJoiner {
     /// BLE 握手只给 MAC/端口，不给 IP。RTSP 端口挂在网关（车机）上，
     /// 所以加入车机网络后取本机接口所在子网的 .1 即可。
     /// - Returns: 例如 "192.168.43.1"；没有可用接口时返回 nil
-    func guessGatewayIPv4() -> String? {
+    static func guessGatewayIPv4() -> String? {
         var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddrPtr) == 0, let first = ifaddrPtr else { return nil }
         defer { freeifaddrs(ifaddrPtr) }
@@ -141,7 +141,6 @@ final class WiFiJoiner {
         let parts = ip.split(separator: ".")
         guard parts.count == 4 else { return nil }
         let gateway = parts[0...2].joined(separator: ".") + ".1"
-        onLog?("[WiFi] 本机 \(ip) → 网关（车机）\(gateway)")
         return gateway
     }
 }

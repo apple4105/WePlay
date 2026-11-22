@@ -387,9 +387,9 @@ final class LinkController {
         diag.log("管线", "── Carlink 会话 ──")
         carlinkSession?.stop()
 
-        // BLE 只给了 MAC/端口；车机 IP 用网关推断
-        let host = wifiJoiner?.guessGatewayIPv4() ?? "192.168.43.1"
-        let localIP = wifiJoiner?.currentLocalIPv4() ?? "192.168.43.2"
+        // BLE 只给了 MAC/端口；车机 IP 用网关推断（快捷指令路径 wifiJoiner 为空 → 静态方法）
+        let host = WiFiJoiner.guessGatewayIPv4() ?? "192.168.43.1"
+        let localIP = WiFiJoiner.currentLocalIPv4() ?? "192.168.43.2"
         diag.log("管线", "车机 \(host) / 本机 \(localIP)（MAC=\(reply.mac)）")
 
         do {
@@ -493,6 +493,22 @@ final class LinkController {
         Diagnostics.shared.log("Carlink", "用户输入配对码（\(code.count) 位）")
         carlinkSession?.submitPin(code)
         PipelineState.shared.pinRequired = false
+    }
+
+    /// 快捷指令/自动化入口（可能后台执行）：
+    /// 有缓存凭证 → 直接 Carlink（Wi-Fi 自动化触发时 iPhone 已在 DIRECT 网内）；
+    /// 没有 → 走 BLE（后台服务过滤扫描会自动发现车机）。
+    @discardableResult
+    func connectFromShortcut() -> Bool {
+        if let reply = cachedReply {
+            Diagnostics.shared.log("管线", "快捷指令：缓存凭证 SSID=\(reply.ssid) 直连 Carlink")
+            phase = .bleConnected
+            startWFD(reply)
+            return true
+        }
+        Diagnostics.shared.log("管线", "快捷指令：无缓存凭证，走 BLE 扫描")
+        connectToCar()
+        return false
     }
 
     /// WFD 就绪后把媒体会话指向本机 MediaTCPListener（同机回环）
