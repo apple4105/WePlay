@@ -293,7 +293,6 @@ extension LinkBootstrap: CBPeripheralDelegate {
                                             content: content, trigger: nil)
         center.add(request)
     }
-    }
 
     func peripheral(
         _ peripheral: CBPeripheral,
