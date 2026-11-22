@@ -15,13 +15,13 @@ struct ConnectCarIntent: AppIntent {
     static var openAppWhenRun = false
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        let dialog: String = await MainActor.run {
+        let dialogText: String = await MainActor.run {
             LinkController.shared.start()
             if LinkController.shared.connectFromShortcut() {
                 return "正在连接车机（使用缓存凭证）"
             }
             return "正在搜索车机…"
         }
-        return .result(dialog: dialog)
+        return .result(dialog: IntentDialog(stringLiteral: dialogText))
     }
 }
