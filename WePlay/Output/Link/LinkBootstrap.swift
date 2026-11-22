@@ -26,6 +26,11 @@ final class LinkBootstrap: NSObject {
     /// 失败
     var onFailure: ((Error) -> Void)?
 
+    /// 车机 GATT 已连上（控制器据此切换到"等凭证回复"超时）
+    var onConnected: (() -> Void)?
+
+    private(set) var isConnected = false
+
     // MARK: - 状态
 
     private var central: CBCentralManager!
@@ -65,6 +70,7 @@ final class LinkBootstrap: NSObject {
         if let peripheral {
             central.cancelPeripheralConnection(peripheral)
         }
+        isConnected = false
         peripheral = nil
         phoneCharacteristic = nil
         headUnitCharacteristic = nil
@@ -161,7 +167,9 @@ extension LinkBootstrap: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        isConnected = true
         onLog?("[link] 已连接，发现服务")
+        onConnected?()
         peripheral.discoverServices([Link.serviceUUID])
     }
 
@@ -178,6 +186,7 @@ extension LinkBootstrap: CBCentralManagerDelegate {
         didDisconnectPeripheral peripheral: CBPeripheral,
         error: Error?
     ) {
+        isConnected = false
         onLog?("[link] 连接断开：\(error?.localizedDescription ?? "用户取消")")
         self.peripheral = nil
         phoneCharacteristic = nil

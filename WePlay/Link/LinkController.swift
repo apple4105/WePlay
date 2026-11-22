@@ -236,6 +236,13 @@ final class LinkController {
         diag.log("管线", "── 连接车机 ──")
         wfdRetry = 0
 
+        // 防重入：已在扫描/等回复时重复按 = 忽略（0.0.1-b53 真机教训：
+        // 双击创建两个并行 GATT 客户端，车机懵了不回凭证）
+        if bleBootstrap != nil, phase == .bleScanning || phase == .bleConnected {
+            diag.log("管线", "已在扫描/等回复中，忽略重复触发")
+            return
+        }
+
         // 虚拟 accessory 只在连接期间存在（避免幽灵配件顶掉其他 CarPlay 会话）
         if transport == nil {
             startTransport()
@@ -272,6 +279,25 @@ final class LinkController {
         // 配对码由 UI 输入后调 bleBootstrap.submitPinCode(_:)
         bleBootstrap.onPinCodeRequired = { code in
             diag.log("BLE", "车机请求配对码：\(code)（请在车机屏幕查看后输入）")
+        }
+
+        // 车机连上后：取消"未发现"超时，换成 20 秒"等凭证回复"超时
+        // （0.0.1-b53 真机教训：12 秒超时把"已连上在等回复"误判成"未发现车机"）
+        bleBootstrap.onConnected = { [weak self] in
+            guard let self else { return }
+            self.bleTimeout?.cancel()
+            diag.log("BLE", "车机已连上，等待凭证回复（最长 20 秒）")
+            let replyTimeout = DispatchWorkItem { [weak self] in
+                guard let self, self.cachedReply == nil,
+                      self.phase == .bleScanning || self.phase == .bleConnected else { return }
+                diag.warn("BLE", "20 秒未收到凭证回复——请求已发出但车机未应答")
+                diag.log("管线", "确认车机 CarLink 状态后，再按「连接车机」重试")
+                self.bleBootstrap?.stop()
+                self.bleBootstrap = nil
+                self.phase = .carNotFound
+            }
+            self.bleTimeout = replyTimeout
+            DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: replyTimeout)
         }
 
         bleBootstrap.startScanning()
