@@ -278,18 +278,26 @@ final class CarlinkSession {
             if port == Ports.uibc { onUibcData?(data) }
             return
         }
-        // 其余服务 = CarlinkFrame + SecureRecord
-        guard let reader = frameReaders[port], let cipher = ciphers[port] else { return }
+        // 其余服务 = CarlinkFrame + SecureRecord（字典取的是引用语义包装前的值类型，需可变拷贝）
+        guard frameReaders[port] != nil, ciphers[port] != nil else { return }
+        var reader = frameReaders[port]!
+        var cipher = ciphers[port]!
         do {
             for frame in try reader.feed(data) {
                 let plain = try cipher.open(frame.body)
+                frameReaders[port] = reader
+                ciphers[port] = cipher
                 onServiceFrame?(port, frame, plain)
                 // control 端口：车机的 ACK 帧（method 对应回执）v1 记日志
                 if port == Ports.control {
                     onLog?("control 帧 method=\(frame.method) body \(plain.count)B")
                 }
             }
+            frameReaders[port] = reader
+            ciphers[port] = cipher
         } catch {
+            frameReaders[port] = reader
+            ciphers[port] = cipher
             onLog?("端口 \(port) 解帧失败：\(error)")
             onError?(error)
         }
