@@ -62,6 +62,8 @@ final class DisplaySource {
     private var sinkInput: String = ""
     private var carDisplayMode: CarDisplayMode?
     private var sinkRTPPorts: String = ""
+    /// 车机 RTP 接收端口（从 wfd_client_rtp_ports 解析）——RTP 发送目标
+    private(set) var sinkRTPPort: UInt16?
 
     init() {}
 
@@ -233,7 +235,13 @@ final class DisplaySource {
                     onLog?("[Display] 车机显示参数：\(mode.width)×\(mode.height) @\(mode.fps)fps dpi=\(mode.dpi)")
                     onDisplayMode?(mode)
                 }
-            case "wfd_client_rtp_ports": sinkRTPPorts = value
+            case "wfd_client_rtp_ports":
+                sinkRTPPorts = value
+                // "RTP/AVP/UDP;unicast 19000 0" → 19000 = 车机 RTP 接收端口
+                let nums = value.split(separator: " ").compactMap { Int($0) }
+                if let first = nums.first, first > 0, first <= 65535 {
+                    sinkRTPPort = UInt16(first)
+                }
             default: break
             }
         }

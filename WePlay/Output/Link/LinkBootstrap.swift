@@ -93,7 +93,15 @@ final class LinkBootstrap: NSObject {
             type: Link.typeNetworkBootstrap
         )
         do {
-            let json = try request.encode()
+            // 字段顺序敏感（oxp-clink ble.rs：Kotlin 插入序，type 恒最后）——手工拼，
+            // Swift Codable 的键序不保证
+            let esc: (String) -> String = { s in
+                let d = try! JSONEncoder().encode(s)
+                return String(data: d, encoding: .utf8) ?? "\"\(s)\""
+            }
+            let json = Data("""
+            {"id":\(esc(request.id)),"name":\(esc(request.name)),"model":\(esc(request.model)),"band":\(request.band),"mac":\(esc(request.mac.lowercased())),"type":\(request.type)}
+            """.utf8)
             onLog?("[link] → PhoneRequest (\(json.count) B)：\(String(data: json, encoding: .utf8) ?? "")")
             peripheral.writeValue(json, for: phoneCharacteristic, type: .withResponse)
         } catch {

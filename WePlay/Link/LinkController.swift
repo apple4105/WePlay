@@ -324,6 +324,12 @@ final class LinkController {
 
     /// Carlink 会话（认证 + 服务端口编排）。RTSP 由车机拨入后交给 DisplaySource。
     private var carlinkSession: CarlinkSession?
+    /// CarPlay 媒体管道（iPhone 回环 → RTP → 车机），WFD 就绪后创建
+    private var mediaPipe: CarPlayMediaPipe?
+    /// WFD 就绪前已拨入的媒体连接（管道建好后补挂）
+    private var pendingMediaConnections: [MediaTCPConnection] = []
+    /// "返回车机"手势（左上角长按 1.5s）
+    private let returnGesture = ReturnGesture()
 
     /// 加入车机网络后启动 Carlink 会话（认证 → 车机拨入 RTSP → WFD 协商）。
     /// 失败由统一恢复入口按指数退避重试。
@@ -358,9 +364,9 @@ final class LinkController {
                 diag.log("管线", "车机已拨入 RTSP → 启动 WFD 协商")
                 self?.startDisplay(with: transport, host: host)
             }
-            session.onUibcData = { data in
+            session.onUibcData = { [weak self] data in
                 Diagnostics.shared.hex("UIBC", "← 车机触摸", data)
-                // v1：UIBC 解析接 TouchRelay 待做
+                self?.handleUibc(data)
             }
             session.start()
         } catch {
@@ -387,14 +393,48 @@ final class LinkController {
             self.phase = .wfdNegotiating
             diag.log("管线", "WFD 会话已建立 → 等待 CarPlay 数据")
 
-            // M4: iPhone 的 CarPlay 数据从 transport.onData 进来，
-            // 解出视频帧后 → 这里做 RTP 打包 → 车机
-            self.rtpPacketizer = RTPPacketizer()
-            diag.log("管线", "RTP 打包器就绪（视频 \(session.host):\(session.port)）")
+            // 媒体管道：iPhone 回环 TCP → H.264 → RTP → 车机声明的 RTP 端口
+            let rtpPort = self.displaySource?.sinkRTPPort ?? UInt16(19000)
+            let pipe = CarPlayMediaPipe(targetHost: host, targetPort: rtpPort) {
+                diag.log("媒体", $0)
+            }
+            self.mediaPipe = pipe
+            for conn in self.pendingMediaConnections {
+                pipe.attach(conn)
+            }
+            self.pendingMediaConnections.removeAll()
+            diag.log("管线", "媒体管道就绪（RTP → \(host):\(rtpPort)）")
             self.sendStartSession()
         }
         // 窗口模式：不请求全屏（保留车机"返回车机"入口的基础）
         displaySource.connect(host: host, port: CarlinkSession.Ports.rtsp, transport: transport)
+    }
+
+    // MARK: - UIBC（车机触摸 → iPhone HID）+ 返回车机手势
+
+    private func handleUibc(_ data: Data) {
+        for touch in UIBCTouch.parse(data) {
+            // 左上角长按 1.5s = 返回车机（teardown 投屏，保留 accessory/凭证）
+            returnGesture.handle(touch) { [weak self] in
+                Diagnostics.shared.log("管线", "返回车机手势命中——teardown 投屏")
+                self?.teardownProjection()
+            }
+            // 触摸透传给 iPhone CarPlay（HID report）
+            touchRelay?.handleTouch(phase: touch.phase.rawValue,
+                                    normalizedX: touch.x,
+                                    normalizedY: touch.y)
+        }
+    }
+
+    /// 结束投屏（保留 accessory 与凭证缓存——再按连接可直接重连）
+    func teardownProjection() {
+        carlinkSession?.stop()
+        carlinkSession = nil
+        displaySource?.stop()
+        mediaPipe?.stop()
+        mediaPipe = nil
+        returnGesture.reset()
+        phase = .wifiJoined
     }
 
     /// UI 配对码输入 → Carlink 认证续跑
@@ -473,6 +513,13 @@ final class LinkController {
             self?.phase = .carPlayActive
             diag.log("管线", "CarPlay 媒体通道建立——投屏激活")
 
+            // 媒体管道就绪就挂上，否则暂存（WFD 就绪后补挂）
+            if let pipe = self?.mediaPipe {
+                pipe.attach(conn)
+            } else {
+                self?.pendingMediaConnections.append(conn)
+            }
+
             conn.onClose = { [weak self] in
                 diag.warn("媒体", "媒体连接关闭")
                 self?.handleLinkFailure(PipelineError.mediaDisconnected)
@@ -501,6 +548,9 @@ final class LinkController {
         carlinkSession?.stop()
         carlinkSession = nil
         displaySource?.stop()
+        mediaPipe?.stop()
+        mediaPipe = nil
+        pendingMediaConnections.removeAll()
         mediaListener?.stop()
         PipelineState.shared.pinRequired = false
         phase = .idle
