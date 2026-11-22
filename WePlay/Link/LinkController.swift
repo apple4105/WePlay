@@ -287,11 +287,17 @@ final class LinkController {
             diag.log("BLE", "车机请求配对码：\(code)（请在车机屏幕查看后输入）")
         }
 
-        // 车机连上后：取消"未发现"超时，换成 20 秒"等凭证回复"超时
-        // （0.0.1-b53 真机教训：12 秒超时把"已连上在等回复"误判成"未发现车机"）
+        let foreground = UIApplication.shared.applicationState == .active
+
+        // 车机连上后：取消"未发现"超时，换成 20 秒"等凭证回复"超时（仅前台；
+        // 后台自动发现模式不限时——它就是"车机要连了自动唤醒"的机制本身）
         bleBootstrap.onConnected = { [weak self] in
             guard let self else { return }
             self.bleTimeout?.cancel()
+            guard foreground else {
+                diag.log("BLE", "后台自动发现：车机已连上，等待凭证（不限时）")
+                return
+            }
             diag.log("BLE", "车机已连上，等待凭证回复（最长 20 秒）")
             let replyTimeout = DispatchWorkItem { [weak self] in
                 guard let self, self.cachedReply == nil,
@@ -308,6 +314,9 @@ final class LinkController {
 
         bleBootstrap.startScanning()
         phase = .bleScanning
+
+        // 后台模式不设发现超时（车机随时可能开 ICCOA；发现即唤醒）
+        guard foreground else { return }
 
         let timeout = DispatchWorkItem { [weak self] in
             guard let self, self.cachedReply == nil, self.phase == .bleScanning else { return }
@@ -360,6 +369,9 @@ final class LinkController {
 
     /// Carlink 会话（认证 + 服务端口编排）。RTSP 由车机拨入后交给 DisplaySource。
     private var carlinkSession: CarlinkSession?
+
+    /// 后台自动发现拿到凭证后置位——App 打开时自动续连（用户点通知即可）
+    var autoConnectPending = false
     /// CarPlay 媒体管道（iPhone 回环 → RTP → 车机），WFD 就绪后创建
     private var mediaPipe: CarPlayMediaPipe?
     /// WFD 就绪前已拨入的媒体连接（管道建好后补挂）

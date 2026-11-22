@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import CoreBluetooth
+import UserNotifications
 
 /// 显示端的 BLE 引导：扫描 → 连接 → 拿入网凭证。
 ///
@@ -46,23 +47,32 @@ final class LinkBootstrap: NSObject {
 
     override init() {
         super.init()
-        central = CBCentralManager(delegate: self, queue: nil)
+        // 状态恢复标识：App 被系统杀掉后，BLE 事件仍能把它拉回后台
+        central = CBCentralManager(delegate: self, queue: nil,
+                                   options: [CBCentralManagerOptionRestoreIdentifierKey: "weplay.ble.central"])
     }
 
     // MARK: - 公开动作
 
     /// 开始扫描（central 上电后自动调用）。
-    /// 诊断期**不按服务 UUID 过滤**：把周围所有广播记下来——车机广播若不带
-    /// ICCOA 服务 UUID 也能看见，命中判断在 didDiscover 里做。
+    /// - 前台：全量扫描（诊断期把周围所有广播记下来，命中判断在 didDiscover 里做）
+    /// - 后台：**必须带服务过滤**（iOS 后台只把过滤命中的广播递给 App），
+    ///   过滤 = 车机广播服务 0000fcfb —— 这是"车机要连了自动唤醒 WePlay"的机制
     func startScanning() {
         guard central.state == .poweredOn else {
             onLog?("[link] 蓝牙未就绪（\(central.state.rawValue)），等回调")
             return
         }
-        onLog?("[link] 开始全量扫描（命中条件：ICCOA 服务或 DIRECT- 名称）")
-        central.scanForPeripherals(withServices: nil, options: [
-            CBCentralManagerScanOptionAllowDuplicatesKey: true
-        ])
+        let background = UIApplication.shared.applicationState != .active
+        if background {
+            onLog?("[link] 后台扫描（服务过滤 0000fcfb）——等待车机开 ICCOA")
+            central.scanForPeripherals(withServices: [Link.vendorUUID], options: nil)
+        } else {
+            onLog?("[link] 开始全量扫描（命中条件：ICCOA 服务或 DIRECT- 名称）")
+            central.scanForPeripherals(withServices: nil, options: [
+                CBCentralManagerScanOptionAllowDuplicatesKey: true
+            ])
+        }
     }
 
     func stop() {
@@ -166,6 +176,11 @@ extension LinkBootstrap: CBCentralManagerDelegate {
         }
     }
 
+    /// 系统恢复蓝牙状态（App 被杀后 BLE 事件把它拉回后台时走这里）
+    func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+        onLog?("[link] 系统已恢复蓝牙状态（后台自动发现运行中）")
+    }
+
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         isConnected = true
         onLog?("[link] 已连接，发现服务")
@@ -256,9 +271,28 @@ extension LinkBootstrap: CBPeripheralDelegate {
             let reply = try Link.HeadUnitReply.parse(data)
             onLog?("[link] 凭证：SSID=\(reply.ssid) freq=\(reply.freq) port=\(reply.port) MAC=\(reply.mac) type=\(reply.type)")
             onCredentials?(reply)
+            // 后台自动发现：凭证到手 → 通知用户 + 置自动续连标志（打开 App 直接续连）
+            if UIApplication.shared.applicationState != .active {
+                LinkController.shared.autoConnectPending = true
+                Self.postReadyNotification(reply)
+            }
         } catch {
             onFailure?(error)
         }
+    }
+
+    /// 后台凭证到手时的本地通知（用户点一下即回到 App 完成连接）
+    static func postReadyNotification(_ reply: Link.HeadUnitReply) {
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        let content = UNMutableNotificationContent()
+        content.title = "车机已就绪"
+        content.body = "发现 CarLink 车机（\(reply.ssid)）。打开 WePlay 按「启动」即可投屏。"
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: "weplay.car.ready",
+                                            content: content, trigger: nil)
+        center.add(request)
+    }
     }
 
     func peripheral(

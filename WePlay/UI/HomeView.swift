@@ -53,6 +53,11 @@ struct HomeView: View {
             }
             .onAppear {
                 controller.start()
+                // 后台自动发现拿到过凭证 → 打开 App 直接续连（通知点按路径）
+                if controller.autoConnectPending {
+                    controller.autoConnectPending = false
+                    controller.connectToCar()
+                }
             }
             .preferredColorScheme(.dark)
         }

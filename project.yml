@@ -40,7 +40,7 @@ targets:
         NSMicrophoneUsageDescription: "WePlay 需要麦克风以支持语音输入。"
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
-        UIBackgroundModes: [audio]
+        UIBackgroundModes: [audio, bluetooth-central]
         UILaunchScreen: {}
         UIRequiredDeviceCapabilities: [arm64]
         UISupportedInterfaceOrientations:
