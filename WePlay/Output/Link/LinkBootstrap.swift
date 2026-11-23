@@ -86,6 +86,8 @@ final class LinkBootstrap: NSObject {
         headUnitCharacteristic = nil
         loggedPeripherals.removeAll()
         writePending = false
+        credentialAttempts = 0
+        credentialType = Link.typeNetworkBootstrap
     }
 
     /// 用户在 UI 里输入了配对码后调用。
@@ -106,18 +108,25 @@ final class LinkBootstrap: NSObject {
     /// 写入是否还挂着（watchdog 用）
     private var writePending = false
 
-    private func requestCredentials() {
+    /// 凭证请求重试计数（写入未确认时换 type 再发，最多重试一次）
+    private var credentialAttempts = 0
+
+    /// 当前这一轮用的 type（1001 初始 / 1002 二轮）
+    private var credentialType: Int = Link.typeNetworkBootstrap
+
+    private func requestCredentials(type: Int? = nil) {
         guard let peripheral, let phoneCharacteristic else {
             onFailure?(LinkError.characteristicMissing("phone \(Link.phoneCharacteristicUUID)"))
             return
         }
+        if let type { credentialType = type }
         let request = Link.PhoneRequest(
             id: UUID().uuidString,
             name: HostIdentity.deviceName,
             model: UIDevice.current.model,
             band: 0,
             mac: selfMAC,
-            type: Link.typeNetworkBootstrap
+            type: credentialType
         )
         do {
             // 字段顺序敏感（oxp-clink ble.rs：Kotlin 插入序，type 恒最后）——手工拼，
@@ -155,10 +164,24 @@ final class LinkBootstrap: NSObject {
     /// 写入确认看门狗：`.withResponse` 写入必须由车机回 Write Response。
     /// 8 秒没回说明车机 GATT 根本没处理这次写入（MTU 过小/未订阅/栈忙），
     /// 和"车机收到了但不回凭证"是两种完全不同的故障，必须分开报。
+    ///
+    /// 静默丢失时自动换 type 重试一次（1001 ↔ 1002）：一次上车就能同时排除
+    /// "写入丢了"和"车机只要二轮变体"两种可能。
     private func scheduleWriteWatchdog() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
             guard let self, self.writePending else { return }
-            self.onLog?("[link] ⚠️ 写入 8 秒未确认——车机 GATT 未回 Write Response（MTU 过小或车机未处理该特征）")
+            self.writePending = false
+            guard self.credentialAttempts < 1 else {
+                self.onLog?("[link] ⚠️ 第二次写入（type=\(self.credentialType)）仍未确认——车机 GATT 栈未处理本特征。请看上方『写入上限』行定性 MTU")
+                return
+            }
+            self.credentialAttempts += 1
+            let nextType = self.credentialType == Link.typeNetworkBootstrap
+                ? Link.typeSecondRound : Link.typeNetworkBootstrap
+            self.onLog?("[link] ⚠️ 写入 8 秒未确认（type=\(self.credentialType)）——车机 GATT 未回 Write Response。2 秒后换 type=\(nextType) 重试")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                self?.requestCredentials(type: nextType)
+            }
         }
     }
 }
