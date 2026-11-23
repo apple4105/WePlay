@@ -20,6 +20,7 @@ struct HomeView: View {
                     VStack(spacing: 28) {
                         heroRing
                         statusSentence
+                        manualJoinCard
                         actionButton
                         pinEntryButton
                         versionLine
@@ -101,6 +102,10 @@ struct HomeView: View {
         case LinkController.Phase.bleConnected.rawValue:
             return Hero(progress: 0.2, ring: .green, icon: nil, center: "20%",
                         word: "连接车机", sentence: "已连上车机蓝牙，正在拿取网络凭证……")
+        case LinkController.Phase.wifiManualJoin.rawValue:
+            return Hero(progress: 0.35, ring: .orange, icon: "wifi.exclamationmark",
+                        center: nil, word: "等待加入网络",
+                        sentence: "请按下方卡片里的名称和密码，在 设置 → Wi-Fi 里连接车机网络。")
         case LinkController.Phase.wifiJoined.rawValue:
             return Hero(progress: 0.45, ring: .green, icon: nil, center: "45%",
                         word: "加入网络", sentence: "已加入车机网络。")
@@ -193,6 +198,56 @@ struct HomeView: View {
 
     private enum ButtonKind { case start, stopScan, stopAll, disconnect }
 
+    /// 手动加入车机 Wi-Fi 的凭证卡片。
+    ///
+    /// 免费 Apple 账号没有 HotspotConfiguration entitlement，`NEHotspotConfiguration`
+    /// 会失败——只能让用户去「设置 → Wi-Fi」手动连一次。凭证必须显眼、可复制，
+    /// 否则用户看到"加入网络"却不知道加哪个。
+    @ViewBuilder private var manualJoinCard: some View {
+        if let join = state.manualJoin {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("请手动加入车机 Wi-Fi", systemImage: "wifi")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.orange)
+                HStack {
+                    Text("网络名称")
+                        .font(.system(size: 13))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Text(join.ssid)
+                        .font(.system(size: 13, design: .monospaced))
+                    Button {
+                        UIPasteboard.general.string = join.ssid
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 12))
+                    }
+                }
+                HStack {
+                    Text("密码")
+                        .font(.system(size: 13))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Text(join.psk)
+                        .font(.system(size: 13, design: .monospaced))
+                    Button {
+                        UIPasteboard.general.string = join.psk
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 12))
+                    }
+                }
+                Text("去 设置 → Wi-Fi 连接「\(join.ssid)」，连好后回到 App 按「连接车机」（凭证已缓存，会直连）")
+                    .font(.system(size: 11))
+                    .foregroundColor(Color(white: 0.45))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(14)
+            .background(Color(white: 0.12))
+            .cornerRadius(14)
+        }
+    }
+
     /// 手输配对码入口。
     ///
     /// 官方流程里 BLE 建网阶段不需要配对码，但车机屏若真弹出配对码，
@@ -216,6 +271,7 @@ struct HomeView: View {
             return ("断开连接", .red, true, .disconnect)
         case LinkController.Phase.bleScanning.rawValue,
              LinkController.Phase.bleConnected.rawValue,
+             LinkController.Phase.wifiManualJoin.rawValue,
              LinkController.Phase.wifiJoined.rawValue,
              LinkController.Phase.wfdNegotiating.rawValue:
             // 连接全程都可停（照 OpenXPlay：进行中 = 停止）

@@ -25,6 +25,9 @@ final class PipelineState: ObservableObject {
     @Published var phaseText: String = "未启动"
     /// 车机要求配对码（主页据此弹输入框）
     @Published var pinRequired = false
+    /// 需要用户手动加入车机 Wi-Fi（免费账号无 HotspotConfiguration entitlement）。
+    /// 主页据此显示 SSID/密码卡片，用户去「设置 → Wi-Fi」连一次。
+    @Published var manualJoin: (ssid: String, psk: String)?
 }
 
 final class LinkController {
@@ -58,6 +61,7 @@ final class LinkController {
         case bleScanning = "正在搜索车机…"
         case carNotFound = "未发现车机（确认车机已开投屏）"
         case bleConnected = "BLE 已连车机"
+        case wifiManualJoin = "等待手动加入车机 Wi-Fi"
         case wifiJoined = "已加入车机网络"
         case wfdNegotiating = "WFD 协商中"
         case carPlayActive = "CarPlay 已激活"
@@ -363,14 +367,19 @@ final class LinkController {
         }
         wifiJoiner.onJoined = { [weak self] ssid in
             guard let self else { return }
+            DispatchQueue.main.async { PipelineState.shared.manualJoin = nil }
             self.phase = .wifiJoined
             diag.log("管线", "已加入车机网络 \(ssid)")
             self.startWFD(reply)
         }
-        wifiJoiner.onManualJoinRequired = { (ssid, psk) in
+        wifiJoiner.onManualJoinRequired = { [weak self] (ssid, psk) in
             diag.warn("WiFi", "需要手动加入：SSID=\(ssid) 密码=\(psk)")
-            diag.log("管线", "请在 设置→Wi-Fi 里连接 \(ssid)，然后回到 App 再按「连接车机」（凭证已缓存，会直连）")
-            // 手动模式下不自动继续：用户连好后再按连接，走缓存凭证 → join 立即成功 → WFD
+            // 免费账号没有 HotspotConfiguration entitlement → 只能手动加。
+            // 把凭证推到主页卡片（可复制），用户连好后按「连接车机」走缓存凭证直连。
+            DispatchQueue.main.async {
+                self?.phase = .wifiManualJoin
+                PipelineState.shared.manualJoin = (ssid, psk)
+            }
         }
         wifiJoiner.join(ssid: reply.ssid, psk: reply.psk)
     }
