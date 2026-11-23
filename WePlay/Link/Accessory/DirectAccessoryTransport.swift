@@ -65,13 +65,7 @@ final class DirectAccessoryTransport: NSObject {
     /// 会直接崩（b72 实锤：点「连接车机」立刻闪退，且日志来不及落盘）。
     private static let transportTypesToTry: [Int] = [2, 1]
 
-    /// `createEndpoint…andProtocol:` 的取值候选。
-    ///
-    /// CarWithin `DirectAccessoryTransport.m` 传的是**整数 4**，不是字符串（传字符串
-    /// iOS 会静默拒绝端点）。但我们在 iOS 27.2 实测 protocol=4 也不返回 endpoint UUID，
-    /// 而 `ACCEndpoint_Protocol_t` 枚举值未公开——所以列候选逐个试，把每个的返回值
-    /// 都打进日志，一次上车拿全数据。4 排第一（CarWithin 实证可用）。
-    private static let endpointProtocolCandidates = [4, 1, 2, 3, 5, 6, 0]
+    /// `createEndpoint…andProtocol:` 的取值候选在下方 `endpointProtocolCandidates`。
 
     // MARK: - 运行时状态
 
@@ -154,9 +148,12 @@ final class DirectAccessoryTransport: NSObject {
     /// 发布 endpoint：把 dataOutHandler 闭包传给 CoreAccessories。
     /// handler 收到的 (NSString, NSString, NSData) = (connectionUUID, endpointUUID, 数据)。
     ///
-    /// **逐个 protocol 试**：CarWithin 用 (transportType=2, protocol=4) 且可用，但我们在
-    /// iOS 27.2 实测该组合不返回 endpoint UUID。`ACCEndpoint_Protocol_t` 枚举值未公开，
-    /// 所以把每个组合的返回值都打进日志——一次上车拿全数据。
+    /// **每次启动只调一次 createEndpoint**，protocol 取值在 UserDefaults 里轮换。
+    ///
+    /// 曾经在启动时连着调 7 次（逐个 protocol 试），结果 b70/b71/b72 全部点「连接车机」
+    /// 立刻闪退——b68 只调一次反而不崩。所以改成一次一换：本次用记录的 protocol，
+    /// 失败了就把下一个 protocol 写回 UserDefaults，下次启动自动试下一个。
+    /// 既不冒重复调用的险，又能跨启动把参数扫全。
     private func publishEndpoint(client: AnyObject, connectionUUID: String) {
         let sel = NSSelectorFromString(
             "createEndpointWithTransportType:andProtocol:andIdentifier:andDataOutHandler:forConnectionWithUUID:publishConnection:"
@@ -166,7 +163,7 @@ final class DirectAccessoryTransport: NSObject {
             return
         }
 
-        // iOS 27 新增的变体（blacktop/ipsw-diffs 发现）——先探是否存在，只记录不强call
+        // iOS 27 新增的变体（blacktop/ipsw-diffs 发现）——只探是否存在，不强call
         let newSel = NSSelectorFromString(
             "createEndpointWithTransportType:andProtocol:andIdentifier:forConnectionWithUUID:withReply:"
         )
@@ -178,30 +175,53 @@ final class DirectAccessoryTransport: NSObject {
         }
         let block = unsafeBitCast(dataOutHandler, to: AnyObject.self)
 
-        // 逐个 protocol 试；命中（返回非空 NSString）即停。
-        // **先只试 transportType 2**（CarWithin 的首选）：b72 实测 type=0 会崩，
-        // 而一次连调十几次 createEndpoint 本身也有风险。type=1 的降级放到
-        // type=2 全试完之后——真到那一步说明 2 全线失败，再冒一次险值得。
-        for proto in Self.endpointProtocolCandidates {
-            let result = sendEndpointCreate(
-                to: client, sel: sel,
-                type: Self.transportTypesToTry[0],
-                protocolNumber: proto,
-                handler: block,
-                connectionUUID: connectionUUID,
-                publish: true
-            )
-            if let endpointID = result as? String, !endpointID.isEmpty {
-                // **返回值就是 endpoint UUID**，必须拿来后续注数据用
-                endpointUUID = endpointID
-                isReady = true
-                log("✅ publish 成功 type=\(Self.transportTypesToTry[0]) protocol=\(proto) endpoint=\(endpointID)")
-                onReady?()
-                return
-            }
-            log("createEndpoint type=\(Self.transportTypesToTry[0]) protocol=\(proto) → 无返回值")
+        let type = Self.transportTypesToTry[0]
+        let proto = Self.currentProtocolCandidate()
+        log("本次尝试 protocol=\(proto)（第 \(Self.protocolCandidateIndex + 1)/\(Self.endpointProtocolCandidates.count) 个候选）")
+
+        let result = sendEndpointCreate(
+            to: client, sel: sel,
+            type: type,
+            protocolNumber: proto,
+            handler: block,
+            connectionUUID: connectionUUID,
+            publish: true
+        )
+        if let endpointID = result as? String, !endpointID.isEmpty {
+            // **返回值就是 endpoint UUID**，必须拿来后续注数据用
+            endpointUUID = endpointID
+            isReady = true
+            // 记下可用的组合，以后固定用它
+            UserDefaults.standard.set(proto, forKey: Self.protocolKey)
+            log("✅ publish 成功 type=\(type) protocol=\(proto) endpoint=\(endpointID)")
+            onReady?()
+            return
         }
-        fail("transportType=2 下所有 protocol 组合都未返回 endpoint UUID——iOS 拒绝了 iAP2 端点")
+        // 失败：轮换到下一个候选，下次启动生效
+        Self.advanceProtocolCandidate()
+        log("createEndpoint type=\(type) protocol=\(proto) → 无返回值；下次启动将试 protocol=\(Self.currentProtocolCandidate())")
+        fail("createEndpoint protocol=\(proto) 未返回 endpoint UUID——iOS 拒绝了 iAP2 端点")
+    }
+
+    /// protocol 候选（4 排第一——CarWithin 实证可用）。`ACCEndpoint_Protocol_t` 枚举值未公开。
+    private static let endpointProtocolCandidates = [4, 1, 2, 3, 5, 6]
+
+    private static let protocolKey = "endpointProtocolCandidateIndex"
+
+    /// 当前要试的 protocol
+    static func currentProtocolCandidate() -> Int {
+        endpointProtocolCandidates[protocolCandidateIndex]
+    }
+
+    /// 轮到下一个候选（越界回到 0）
+    static func advanceProtocolCandidate() {
+        let next = (protocolCandidateIndex + 1) % endpointProtocolCandidates.count
+        UserDefaults.standard.set(next, forKey: protocolKey)
+    }
+
+    private static var protocolCandidateIndex: Int {
+        let stored = UserDefaults.standard.integer(forKey: protocolKey)
+        return stored >= 0 && stored < endpointProtocolCandidates.count ? stored : 0
     }
 
     // MARK: - 数据注入（配件 → iPhone）
