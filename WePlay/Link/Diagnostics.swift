@@ -25,8 +25,71 @@ final class Diagnostics {
     private let maxLines = 500
     private let lock = NSLock()
 
+    /// 日志文件句柄——**每行立即同步落盘**。
+    ///
+    /// 之前只在进后台时 `persistToDisk()`，App 一崩全丢，导致每次闪退都拿不到现场
+    /// （用户反馈"点完启动就闪退，日志因为重新打开都采集不到"）。现在每行都写盘 +
+    /// `synchronizeFile()`（fsync），崩溃也不丢最后几行。
+    private var logFile: FileHandle?
+
+    /// 日志文件 URL（启动时加载上次会话用）
+    static var logFileURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("diagnostics.log")
+    }
+
     /// UI 实时刷新钩子
     var onUpdate: ((String) -> Void)?
+
+    // MARK: - 初始化 / 历史加载
+
+    private init() {
+        openLogFile()
+        loadPreviousSession()
+    }
+
+    private func openLogFile() {
+        let url = Self.logFileURL
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        // 超过 1 MB 就截断重来，避免无限增长
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+           let size = attrs[.size] as? Int, size > 1_000_000 {
+            try? Data().write(to: url)
+        }
+        logFile = try? FileHandle(forWritingTo: url)
+        logFile?.seekToEnd(ofFile: 0)
+    }
+
+    /// 把上次会话的日志尾部载入缓冲，并在 UI 里标出会话边界。
+    /// 这样闪退后重新打开 App，诊断页仍看得到崩溃前的现场。
+    private func loadPreviousSession() {
+        guard let text = try? String(contentsOf: Self.logFileURL, encoding: .utf8) else { return }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let tail = lines.suffix(maxLines)
+        var loaded = 0
+        for line in tail {
+            guard let s = String(line) as String?, !s.isEmpty else { continue }
+            // 文件里是 "[time] [level] [module] message" 的扁平格式，拆回元组
+            let parts = s.components(separatedBy: "] ")
+            if parts.count >= 4 {
+                let time = parts[0].replacingOccurrences(of: "[", with: "")
+                let level = parts[1].replacingOccurrences(of: "[", with: "")
+                let module = parts[2].replacingOccurrences(of: "[", with: "")
+                let message = parts[3...].joined(separator: "] ")
+                buffer.append((time, module, level, message))
+                loaded += 1
+            }
+        }
+        if loaded > 0 {
+            // 会话分隔标记，让用户知道前面是上次的
+            let sep = (time: "────", module: "会话", level: "INFO",
+                       message: "↑ 上次会话（崩溃前）的 \(loaded) 条；↓ 本次会话")
+            buffer.append(sep)
+            writeToDisk("[────] [INFO] [会话] 上次会话载入 \(loaded) 条")
+        }
+    }
 
     // MARK: - 写入
 
@@ -63,9 +126,18 @@ final class Diagnostics {
         }
 
         let line = "[\(time)] [\(level)] [\(module)] \(message)"
+        // 立即同步落盘——崩溃也不丢最后几行（用户痛点：闪退后日志全没）
+        writeToDisk(line)
         DispatchQueue.main.async { [weak self] in
             self?.onUpdate?(line)
         }
+    }
+
+    /// 追加一行到日志文件并 fsync。调用方需持有 `lock`。
+    private func writeToDisk(_ line: String) {
+        guard let handle = logFile else { return }
+        handle.write(Data((line + "\n").utf8))
+        handle.synchronizeFile()
     }
 
     // MARK: - 导出

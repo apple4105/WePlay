@@ -60,8 +60,10 @@ final class DirectAccessoryTransport: NSObject {
         "/System/Library/PrivateFrameworks/CoreAccessories.framework/CoreAccessories"
     private static let clientClassName = "ACCTransportClient"
 
-    /// 传输类型枚举值——真机诊断时逐个尝试（错误分支会明说拒绝原因）
-    private static let transportTypesToTry: [Int] = [2, 1, 0]
+    /// 传输类型候选。**只保留 2 和 1**——CarWithin 只用这两个（2 = Wi-Fi 端点，
+    /// 失败降 1）。曾经把 0 也列进去，而 `createConnectionWithType:0` 在 iOS 27 上
+    /// 会直接崩（b72 实锤：点「连接车机」立刻闪退，且日志来不及落盘）。
+    private static let transportTypesToTry: [Int] = [2, 1]
 
     /// `createEndpoint…andProtocol:` 的取值候选。
     ///
@@ -176,29 +178,30 @@ final class DirectAccessoryTransport: NSObject {
         }
         let block = unsafeBitCast(dataOutHandler, to: AnyObject.self)
 
-        // 逐个 (transportType, protocol) 组合试；命中（返回非空 NSString）即停
-        for type in Self.transportTypesToTry {
-            for proto in Self.endpointProtocolCandidates {
-                let result = sendEndpointCreate(
-                    to: client, sel: sel,
-                    type: type,
-                    protocolNumber: proto,
-                    handler: block,
-                    connectionUUID: connectionUUID,
-                    publish: true
-                )
-                if let endpointID = result as? String, !endpointID.isEmpty {
-                    // **返回值就是 endpoint UUID**，必须拿来后续注数据用
-                    endpointUUID = endpointID
-                    isReady = true
-                    log("✅ publish 成功 type=\(type) protocol=\(proto) endpoint=\(endpointID)")
-                    onReady?()
-                    return
-                }
-                log("createEndpoint type=\(type) protocol=\(proto) → 无返回值")
+        // 逐个 protocol 试；命中（返回非空 NSString）即停。
+        // **先只试 transportType 2**（CarWithin 的首选）：b72 实测 type=0 会崩，
+        // 而一次连调十几次 createEndpoint 本身也有风险。type=1 的降级放到
+        // type=2 全试完之后——真到那一步说明 2 全线失败，再冒一次险值得。
+        for proto in Self.endpointProtocolCandidates {
+            let result = sendEndpointCreate(
+                to: client, sel: sel,
+                type: Self.transportTypesToTry[0],
+                protocolNumber: proto,
+                handler: block,
+                connectionUUID: connectionUUID,
+                publish: true
+            )
+            if let endpointID = result as? String, !endpointID.isEmpty {
+                // **返回值就是 endpoint UUID**，必须拿来后续注数据用
+                endpointUUID = endpointID
+                isReady = true
+                log("✅ publish 成功 type=\(Self.transportTypesToTry[0]) protocol=\(proto) endpoint=\(endpointID)")
+                onReady?()
+                return
             }
+            log("createEndpoint type=\(Self.transportTypesToTry[0]) protocol=\(proto) → 无返回值")
         }
-        fail("所有 (transportType, protocol) 组合都未返回 endpoint UUID——iOS 拒绝了 iAP2 端点")
+        fail("transportType=2 下所有 protocol 组合都未返回 endpoint UUID——iOS 拒绝了 iAP2 端点")
     }
 
     // MARK: - 数据注入（配件 → iPhone）
