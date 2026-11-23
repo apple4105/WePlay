@@ -89,6 +89,7 @@ final class LinkBootstrap: NSObject {
         credentialAttempts = 0
         credentialType = Link.typeNetworkBootstrap
         descriptorDiscovered = false
+        rediscoveryCount = 0
     }
 
     /// 用户在 UI 里输入了配对码后调用。
@@ -117,6 +118,9 @@ final class LinkBootstrap: NSObject {
 
     /// 是否在等凭证回复（看门狗用）
     private var replyPending = false
+
+    /// 已重新发现服务的次数（最多 1 次，避免无限循环）
+    private var rediscoveryCount = 0
 
     private func requestCredentials() {
         guard let peripheral, let phoneCharacteristic else {
@@ -161,25 +165,52 @@ final class LinkBootstrap: NSObject {
         }
     }
 
-    /// 凭证回复看门狗：8 秒没收到 HeadUnitReply 就换 (type, 写入模式) 重发一次。
+    /// 凭证回复看门狗：6 秒没收到 HeadUnitReply 就换 (type, 写入模式) 重发；
+    /// 两轮都失败后**重新发现服务与特征**再试一轮（OpenXPlay 0.4.0/428 同款对策）。
     ///
-    /// 第一次用 withoutResponse（绕开车机不回写确认）；第二次换 type=1002 +
-    /// withResponse（覆盖"车机只要二轮变体"和"必须走写确认路径"两种可能）。
+    ///  ladder：
+    ///  - t=0   type=1001 + withoutResponse（绕开车机不回写确认）
+    ///  - t=6   type=1002 + withResponse
+    ///  - t=12  重新发现服务+特征 → 再发 type=1001 + withoutResponse
+    ///  - t=18  两轮都空 → 明确定性
     private func scheduleReplyWatchdog() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
             guard let self, self.replyPending else { return }
             guard self.credentialAttempts < 1 else {
-                self.onLog?("[link] ⚠️ 两次请求均无凭证回复。车机对 ATT 读取（服务/特征发现）有响应、对写入与特征值读取无响应——典型原因是车机要求链路配对/加密，或其 BLE 栈不回写确认")
+                // 第二轮也空：OpenXPlay 的对策是重新发现服务（车机 GATT 数据库
+                // 可能在连接后被重新发布，旧的 characteristic 句柄已失效）
+                guard self.rediscoveryCount < 1 else {
+                    self.onLog?("[link] ⚠️ 重新发现后仍无凭证回复。车机对 ATT 读取（服务/特征发现）有响应、对写入与特征值读取无响应——典型原因是车机要求链路配对/加密，或其 BLE 栈不回写确认")
+                    return
+                }
+                self.rediscoveryCount += 1
+                self.onLog?("[link] ⚠️ 两次请求均无回复——重新发现服务与特征（OpenXPlay 同款对策）")
+                self.rediscoverServices()
                 return
             }
             self.credentialAttempts += 1
             self.credentialType = self.credentialType == Link.typeNetworkBootstrap
                 ? Link.typeSecondRound : Link.typeNetworkBootstrap
-            self.onLog?("[link] ⚠️ 8 秒无凭证回复——换 type=\(self.credentialType) + withResponse 重发")
+            self.onLog?("[link] ⚠️ 6 秒无凭证回复——换 type=\(self.credentialType) + withResponse 重发")
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
                 self?.requestCredentials()
             }
         }
+    }
+
+    /// 重新发现服务与特征。
+    ///
+    /// OpenXPlay 0.4.0/428：「蓝牙找到车机但读不到车机服务时，会重新发现服务」。
+    /// 车机 GATT 数据库可能在连接后被重新发布（或首轮发现拿到的是陈旧句柄），
+    /// 重新发现能让后续读写落到正确的句柄上。
+    private func rediscoverServices() {
+        guard let peripheral else { return }
+        credentialAttempts = 0
+        credentialType = Link.typeNetworkBootstrap
+        descriptorDiscovered = false
+        phoneCharacteristic = nil
+        headUnitCharacteristic = nil
+        peripheral.discoverServices([Link.serviceUUID])
     }
 }
 
@@ -242,6 +273,7 @@ extension LinkBootstrap: CBCentralManagerDelegate {
         isConnected = true
         onLog?("[link] 已连接，发现服务")
         onConnected?()
+        logWiFiState()
         peripheral.discoverServices([Link.serviceUUID])
     }
 
@@ -323,6 +355,19 @@ extension LinkBootstrap: CBPeripheralDelegate {
         // 不等 CCCD 确认就发请求。官方顺序虽是"先订阅后写"，但车机栈对写入普遍
         // 不回确认（b57/b65 两次都静默在第一个 GATT 写入上），等它会把整个流程堵死。
         requestCredentials()
+    }
+
+    /// 连接建立时的 Wi-Fi 状态诊断。
+    ///
+    /// OpenXPlay 0.4.0/428 明确记录：**iPhone 还连着之前的车机 Wi-Fi 时，车机会
+    /// 连续拒绝连接**。他们的对策是提示用户关闭后重开 Wi-Fi。iOS 读不到当前 SSID
+    /// （需要定位授权），但能判断"是否在某个 Wi-Fi 上"——这足以给用户 actionable 提示。
+    private func logWiFiState() {
+        if let ip = WiFiJoiner.currentLocalIPv4() {
+            onLog?("[link] ⚠️ iPhone 当前已连接 Wi-Fi（本机地址 \(ip)）。若这是之前那台车机的 Wi-Fi，车机可能连续拒绝连接——OpenXPlay 的对策是关闭 Wi-Fi 后重开，再试")
+        } else {
+            onLog?("[link] iPhone 当前未连接 Wi-Fi（连接车机前的推荐状态）")
+        }
     }
 
     /// 描述符发现结果——真正的订阅放这里
