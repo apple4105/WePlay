@@ -21,6 +21,7 @@ struct HomeView: View {
                         heroRing
                         statusSentence
                         actionButton
+                        pinEntryButton
                         versionLine
                     }
                     .padding(.horizontal, 20)
@@ -191,6 +192,23 @@ struct HomeView: View {
     }
 
     private enum ButtonKind { case start, stopScan, stopAll, disconnect }
+
+    /// 手输配对码入口。
+    ///
+    /// 官方流程里 BLE 建网阶段不需要配对码，但车机屏若真弹出配对码，
+    /// 用户得有个地方能填——否则只能干等。连接全程都显示。
+    private var pinEntryButton: some View {
+        Button {
+            showPinInput = true
+        } label: {
+            Label("车机屏幕显示了配对码？点此输入", systemImage: "keyboard")
+                .font(.system(size: 13))
+                .foregroundColor(Color(white: 0.45))
+        }
+        .disabled(state.phaseText == LinkController.Phase.idle.rawValue
+                  || state.phaseText == LinkController.Phase.carPlayActive.rawValue)
+        .padding(.top, -16)
+    }
 
     private var action: (label: String, color: Color, enabled: Bool, kind: ButtonKind) {
         switch state.phaseText {

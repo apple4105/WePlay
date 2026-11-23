@@ -85,15 +85,26 @@ final class LinkBootstrap: NSObject {
         phoneCharacteristic = nil
         headUnitCharacteristic = nil
         loggedPeripherals.removeAll()
+        writePending = false
     }
 
-    /// 用户在 UI 里输入了配对码后调用（具体怎么用待真机确认）
+    /// 用户在 UI 里输入了配对码后调用。
+    ///
+    /// 官方流程（oxp-clink ble.rs）确认：**BLE 建网阶段不需要配对码**——PhoneRequest
+    /// 直接换 HeadUnitReply。配对码属于后续 Carlink 认证（手机拨 57209）阶段。
+    /// 这里先把码存下来并全量打日志，供认证阶段使用和联调对照。
     func submitPinCode(_ code: String) {
-        onLog?("[link] 用户输入配对码：\(code)（长度 \(code.count)）")
-        // TODO: 真机确认配对码走哪个变体/特征后接进来
+        lastPinCode = code
+        onLog?("[link] 用户输入配对码：\(code)（长度 \(code.count)）——BLE 阶段不用它，留给 Carlink 认证")
     }
 
     // MARK: - 内部
+
+    /// 上一次用户手工输入的配对码（BLE 阶段不用，留给 Carlink 认证阶段）
+    private var lastPinCode: String?
+
+    /// 写入是否还挂着（watchdog 用）
+    private var writePending = false
 
     private func requestCredentials() {
         guard let peripheral, let phoneCharacteristic else {
@@ -118,10 +129,36 @@ final class LinkBootstrap: NSObject {
             let json = Data("""
             {"id":\(esc(request.id)),"name":\(esc(request.name)),"model":\(esc(request.model)),"band":\(request.band),"mac":\(esc(request.mac.lowercased())),"type":\(request.type)}
             """.utf8)
+
+            // 官方第一件事就是 requestMtu(512)。iOS 不暴露 MTU 协商，只能读当前上限——
+            // 这条日志是判断"车机到底收没收到"的关键：上限 < 125 时 withResponse 写入
+            // 根本发不出去，车机自然不会有任何反应。
+            let maxWithResponse = peripheral.maximumWriteValueLength(for: .withResponse)
+            let maxWithoutResponse = peripheral.maximumWriteValueLength(for: .withoutResponse)
+            onLog?("[link] 写入上限：withResponse=\(maxWithResponse) B / withoutResponse=\(maxWithoutResponse) B；请求 \(json.count) B")
+
+            let writeType: CBCharacteristicWriteType =
+                json.count > maxWithResponse ? .withoutResponse : .withResponse
+            if writeType == .withoutResponse {
+                onLog?("[link] ⚠️ 请求超过 withResponse 上限，降级 withoutResponse（车机可能因 MTU 过小收不全）")
+            }
+
             onLog?("[link] → PhoneRequest (\(json.count) B)：\(String(data: json, encoding: .utf8) ?? "")")
-            peripheral.writeValue(json, for: phoneCharacteristic, type: .withResponse)
+            writePending = true
+            peripheral.writeValue(json, for: phoneCharacteristic, type: writeType)
+            scheduleWriteWatchdog()
         } catch {
             onFailure?(error)
+        }
+    }
+
+    /// 写入确认看门狗：`.withResponse` 写入必须由车机回 Write Response。
+    /// 8 秒没回说明车机 GATT 根本没处理这次写入（MTU 过小/未订阅/栈忙），
+    /// 和"车机收到了但不回凭证"是两种完全不同的故障，必须分开报。
+    private func scheduleWriteWatchdog() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            guard let self, self.writePending else { return }
+            self.onLog?("[link] ⚠️ 写入 8 秒未确认——车机 GATT 未回 Write Response（MTU 过小或车机未处理该特征）")
         }
     }
 }
@@ -239,7 +276,7 @@ extension LinkBootstrap: CBPeripheralDelegate {
             switch c.uuid {
             case Link.phoneCharacteristicUUID:
                 phoneCharacteristic = c
-                onLog?("[link] 手机特征就绪 \(c.uuid)")
+                onLog?("[link] 手机特征就绪 \(c.uuid)（属性 \(c.properties.rawValue)）")
             case Link.headUnitCharacteristicUUID:
                 headUnitCharacteristic = c
                 onLog?("[link] 对端特征就绪 \(c.uuid)（属性 \(c.properties.rawValue)）")
@@ -255,6 +292,29 @@ extension LinkBootstrap: CBPeripheralDelegate {
         // 先读一次，拿不到再等通知
         if let headUnitCharacteristic {
             peripheral.readValue(for: headUnitCharacteristic)
+        }
+
+        // 官方流程（oxp-clink BleExchange.kt）：先订阅 CCCD，**等订阅确认后**才写请求。
+        // 车机 GATT 栈普遍要求在 CCCD 落好之后才处理手机特征的写入。
+        if let headUnitCharacteristic, headUnitCharacteristic.properties.contains(.notify) {
+            onLog?("[link] 订阅对端通知（CCCD）…")
+            peripheral.setNotifyValue(true, for: headUnitCharacteristic)
+        } else {
+            requestCredentials()
+        }
+    }
+
+    /// CCCD 订阅结果——确认后才发 PhoneRequest（官方顺序）
+    func peripheral(
+        _ peripheral: CBPeripheral,
+        didUpdateNotificationStateFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        guard characteristic.uuid == Link.headUnitCharacteristicUUID else { return }
+        if let error {
+            onLog?("[link] CCCD 订阅失败：\(error.localizedDescription)——仍尝试发请求")
+        } else {
+            onLog?("[link] CCCD 订阅已确认（isNotifying=\(characteristic.isNotifying)）")
         }
         requestCredentials()
     }
@@ -299,11 +359,12 @@ extension LinkBootstrap: CBPeripheralDelegate {
         didWriteValueFor characteristic: CBCharacteristic,
         error: Error?
     ) {
+        writePending = false
         if let error {
             onLog?("[link] 写特征失败：\(error.localizedDescription)")
             onFailure?(error)
         } else {
-            onLog?("[link] 写特征成功")
+            onLog?("[link] 写特征成功（车机 GATT 已确认收到）——等凭证回复")
         }
     }
 }

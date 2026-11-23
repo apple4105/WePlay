@@ -303,7 +303,7 @@ final class LinkController {
             let replyTimeout = DispatchWorkItem { [weak self] in
                 guard let self, self.cachedReply == nil,
                       self.phase == .bleScanning || self.phase == .bleConnected else { return }
-                diag.warn("BLE", "20 秒未收到凭证回复——请求已发出但车机未应答")
+                diag.warn("BLE", "20 秒未收到凭证回复。请看上面三行定性：①『写特征成功』= 车机收到了但不回 → 车机侧策略/身份问题；②『写入 8 秒未确认』或『写特征失败』= 车机 GATT 没收下（MTU/CCCD/栈忙）；③只有 PhoneRequest 没有后续 = 请求根本没发出去")
                 diag.log("管线", "确认车机 CarLink 状态后，再按「连接车机」重试")
                 self.bleBootstrap?.stop()
                 self.bleBootstrap = nil
