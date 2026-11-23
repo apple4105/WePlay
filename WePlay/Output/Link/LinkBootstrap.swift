@@ -423,11 +423,13 @@ extension LinkBootstrap: CBPeripheralDelegate {
     /// CCCD 描述符**写入**结果（直接写 0x0002 时走这里）
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor descriptor: CBDescriptor, error: Error?) {
         guard descriptor.uuid == Link.cccdUUID else { return }
+        // descriptor.value 是 Any?，要先转 Data
+        let valueHex = (descriptor.value as? Data)?.hexString ?? "nil"
         if let error {
             onLog?("[link] ❌ CCCD 写入失败：\(error.localizedDescription)——退回 setNotifyValue(true)（0x0001 notifications）")
             if let c = headUnitCharacteristic { peripheral.setNotifyValue(true, for: c) }
         } else {
-            onLog?("[link] ✅ CCCD 已启用（值 \(descriptor.value?.hexString ?? "?")）")
+            onLog?("[link] ✅ CCCD 已启用（值 \(valueHex)）")
             resendRequestAfterSubscription()
         }
     }
@@ -435,7 +437,8 @@ extension LinkBootstrap: CBPeripheralDelegate {
     /// CCCD 描述符读取结果
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor descriptor: CBDescriptor, error: Error?) {
         guard descriptor.uuid == Link.cccdUUID else { return }
-        onLog?("[link] CCCD 当前值 = \(descriptor.value?.hexString ?? "nil")")
+        let valueHex = (descriptor.value as? Data)?.hexString ?? "nil"
+        onLog?("[link] CCCD 当前值 = \(valueHex)")
     }
 
     /// CCCD 订阅结果（setNotifyValue 路径；仅记录 + 补发请求）
