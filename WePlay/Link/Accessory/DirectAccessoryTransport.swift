@@ -1,6 +1,7 @@
 import Foundation
 import CoreBluetooth
 import Darwin
+import CryptoKit
 
 /// 虚拟配件传输层：把本机伪装成一台 CarPlay 车机，让 iPhone 的 CarPlay 栈
 /// 主动连上来。
@@ -49,6 +50,10 @@ final class DirectAccessoryTransport: NSObject {
     /// 不可恢复失败
     var onFailure: ((String) -> Void)?
 
+    /// MFi 身份（证书 + 私钥）。用于派生配件 MAC 和后续认证。
+    /// AccessoryIdentity 是 struct，只能强引用。
+    var identity: AccessoryIdentity?
+
     // MARK: - 常量
 
     private static let frameworkPath =
@@ -57,6 +62,14 @@ final class DirectAccessoryTransport: NSObject {
 
     /// 传输类型枚举值——真机诊断时逐个尝试（错误分支会明说拒绝原因）
     private static let transportTypesToTry: [Int] = [2, 1, 0]
+
+    /// `createEndpoint…andProtocol:` 的取值。
+    ///
+    /// CarWithin `DirectAccessoryTransport.m` 传的是**整数 4**，不是字符串。
+    /// 传字符串协议名时 iOS 会静默拒绝端点——现象是"publish 已调用、isReady=true，
+    /// 但永远收不到 dataOutHandler 回调，也收不到任何 iAP2 数据"
+    /// （0.0.1-b65 真机实锤：identification 发出去 20 秒零回包）。
+    private static let endpointProtocol = 4
 
     // MARK: - 运行时状态
 
@@ -100,14 +113,16 @@ final class DirectAccessoryTransport: NSObject {
         log("ACCTransportClient 单例已获取")
 
         // 4. createConnectionWithType:andIdentifier:（实例方法）
-        let connectionID = UUID()
-        connectionUUID = connectionID.uuidString
+        //    CarWithin 用 configuration.deviceID（MAC 形串）作 identifier；
+        // 这里用证书派生的稳定 MAC 串，重开一致。
+        let connectionID = accessoryMAC
+        connectionUUID = connectionID
         let createConnSel = NSSelectorFromString("createConnectionWithType:andIdentifier:")
         if client.responds(to: createConnSel) {
             // transportType 逐个尝试；v1 先取第一个
             let type = Self.transportTypesToTry[0]
-            _ = client.perform(createConnSel, with: type, with: connectionID.uuidString)
-            log("连接已创建 type=\(type) id=\(connectionID.uuidString)")
+            _ = client.perform(createConnSel, with: type, with: connectionID)
+            log("连接已创建 type=\(type) id=\(connectionID)")
         } else {
             fail("createConnectionWithType:andIdentifier: selector missing.")
             return
@@ -115,15 +130,13 @@ final class DirectAccessoryTransport: NSObject {
 
         // 5. createEndpointWithTransportType:andProtocol:andIdentifier:
         //    andDataOutHandler:forConnectionWithUUID:publishConnection:
-        let endpointID = UUID()
-        endpointUUID = endpointID.uuidString
-        publishEndpoint(client: client, connectionUUID: connectionID.uuidString,
-                        endpointUUID: endpointID.uuidString)
+        //    endpoint UUID 用返回值，见 publishEndpoint 内说明
+        publishEndpoint(client: client, connectionUUID: connectionID)
     }
 
     /// 发布 endpoint：把 dataOutHandler 闭包传给 CoreAccessories。
     /// handler 收到的 (NSString, NSString, NSData) = (connectionUUID, endpointUUID, 数据)。
-    private func publishEndpoint(client: AnyObject, connectionUUID: String, endpointUUID: String) {
+    private func publishEndpoint(client: AnyObject, connectionUUID: String) {
         let sel = NSSelectorFromString(
             "createEndpointWithTransportType:andProtocol:andIdentifier:andDataOutHandler:forConnectionWithUUID:publishConnection:"
         )
@@ -138,24 +151,26 @@ final class DirectAccessoryTransport: NSObject {
         }
         let block = unsafeBitCast(dataOutHandler, to: AnyObject.self)
 
-        // Obj-C 消息发送：7 个参数，用 objc_msgSend 直调太啰嗦，
-        // 用 NSInvocation 也不便——这里用 performSelector 链不可行（参数超 2 个），
-        // 所以走 Obj-C runtime 的 objc_msgSend（通过 Swift 的动态派发桥）。
+        // CarWithin：andProtocol = 整数 4，andIdentifier = nil。
+        // 传字符串协议名 iOS 会静默拒绝——表现为"publish 已调用但永远收不到回调"。
         let type = Self.transportTypesToTry[0]
-        let protocolName = "com.apple.carplay"     // iAP2 协议标识，联调时可换
-        // objc_msgSend 的返回值语义未知（endpoint 对象？void？），无法据此判定成败；
-        // 所以只如实记录"已调用"，真正就绪以 iOS 是否回调 dataOutHandler 为准。
-        _ = sendEndpointCreate(
+        let result = sendEndpointCreate(
             to: client, sel: sel,
             type: type,
-            proto: protocolName,
-            identifier: endpointUUID,
+            protocolNumber: Self.endpointProtocol,
             handler: block,
             connectionUUID: connectionUUID,
             publish: true
         )
+
+        // **返回值就是 endpoint UUID**，必须拿来后续注数据用；自己编 UUID 会打空
+        guard let endpointID = result as? String, !endpointID.isEmpty else {
+            fail("createEndpoint 未返回 endpoint UUID——iOS 拒绝了 iAP2 端点（protocol=\(Self.endpointProtocol)）")
+            return
+        }
+        endpointUUID = endpointID
         isReady = true
-        log("publish 已调用（endpoint=\(endpointUUID)），等待 iOS 回调确认")
+        log("publish 成功（endpoint=\(endpointID)）")
         onReady?()
     }
 
@@ -190,6 +205,28 @@ final class DirectAccessoryTransport: NSObject {
 
     // MARK: - 内部
 
+    /// 配件 MAC：从 MFi 证书派生的稳定 6 字节值，格式化成 `AA:BB:CC:DD:EE:FF`。
+    ///
+    /// iAP2 identification 的蓝牙传输组 param 3 和连接 identifier 都用它。
+    /// iOS 拿不到真实 Wi-Fi MAC，用证书派生可保证重开一致（CarWithin 同样用
+    /// deviceID 当 MAC 串）。
+    var accessoryMAC: String {
+        if let cached = cachedMAC { return cached }
+        var source = Data()
+        if let cert = identity?.leafCertificate { source = cert }
+        let digest = SHA256.hash(data: source)
+        let bytes = Array(digest.prefix(6))
+        // 首字节清掉多播/本地位，看起来像正常 MAC
+        let first = bytes[0] & 0xFC
+        var all = [first] + Array(bytes.dropFirst())
+        // 全零（没证书时）给个固定值，避免格式非法
+        if all.allSatisfy({ $0 == 0 }) { all = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01] }
+        let mac = all.map { String(format: "%02X", $0) }.joined(separator: ":")
+        cachedMAC = mac
+        return mac
+    }
+    private var cachedMAC: String?
+
     private func log(_ msg: String) {
         onLog?("[Transport] \(msg)")
     }
@@ -202,25 +239,28 @@ final class DirectAccessoryTransport: NSObject {
 
 // MARK: - Obj-C runtime 桥接
 
-/// objc_msgSend 多参直调的桥（7 参数：type/protocol/identifier/handler/connectionUUID/publish + self+sel）。
-/// 这些函数只在 DirectAccessoryTransport.publishEndpoint 里用一次。
-private var msgSendImpl: IMP?
-
+/// `createEndpointWithTransportType:andProtocol:andIdentifier:andDataOutHandler:
+/// forConnectionWithUUID:publishConnection:` 的多参直调。
+///
+/// **参数语义照 CarWithin `DirectAccessoryTransport.m`（该 App 已发布可用）**：
+/// - `andProtocol:` 是**整数 4**，不是字符串（传字符串 iOS 会静默拒绝，表现为
+///   "publish 已调用但永远收不到 dataOutHandler 回调、也收不到任何 iAP2 数据"）
+/// - `andIdentifier:` 传 **nil**
+/// - **返回值就是 endpoint UUID**（NSString），必须拿来当后续
+///   `processIncomingData:forEndpointWithUUID:` / `destroyEndpointWithUUID:` 的 UUID——
+///   自己编 UUID 会让数据注入打空
 func sendEndpointCreate(
     to client: AnyObject, sel: Selector, type: Int,
-    proto: String, identifier: String,
+    protocolNumber: Int,
     handler: AnyObject, connectionUUID: String, publish: Bool
-) -> Bool {
-    // objc_msgSend(id self, SEL op, ...) 的多参调用在 Swift 里
-    // 标准做法是 cast 成对应签名的 C 函数指针。
-    // 参数顺序：transportType(Int), protocol(NSString), identifier(NSString),
+) -> AnyObject? {
+    // 参数顺序：transportType(Int), protocol(Int), identifier(nil),
     //          handler(block), connectionUUID(NSString), publish(BOOL)
     let fn = unsafeBitCast(
         dlsym(dlopen(nil, RTLD_NOW), "objc_msgSend"),
-        to: (@convention(c) (AnyObject, Selector, Int, NSString, NSString,
+        to: (@convention(c) (AnyObject, Selector, Int, Int, AnyObject?,
                             AnyObject, NSString, Bool) -> AnyObject?).self
     )
-    _ = fn(client, sel, type, proto as NSString,
-           identifier as NSString, handler, connectionUUID as NSString, publish)
-    return true
+    return fn(client, sel, type, protocolNumber, nil, handler,
+              connectionUUID as NSString, publish)
 }

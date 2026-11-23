@@ -12,66 +12,72 @@ import Foundation
 ///
 /// 认证按公开 iAP2 规范：证书 `0x0021` / 挑战 `0x0022` / 应答 `0x0023` / 失败 `0x0024`。
 ///
-/// ## identification 参数（CarWithin `identification(name:deviceID:)` 逐条反汇编）
+/// ## identification 参数（逐条对照 CarWithin `AccessoryMessages.identification`，2026-11-23）
+
+/// | 参数 ID | 内容 |
+/// |---------|------|
+/// | 0 | name |
+/// | 1..5 | `"CP-Receiver-1"` / `"OEM"` / `"SN000001"` / `"1.0.0"` / `"1.0.0"` |
+/// | 6 | `[0x43,0x01]` = MessagesReceived 位掩码（含 0x4301） |
+/// | 7 | `[0x43,0x00]` = MessagesSent 位掩码（含 0x4300） |
+/// | 8 | `[0x00]` 供电能力 |
+/// | 9 | `[0x00,0x00]` 最大取流 |
+/// | 12/13 | `"en"` 语言 |
+/// | 0x10 组 | `[0:[0,1], 1:"USBHost", 2:[], 3:[1], 4:[]]` 传输编号 1 |
+/// | 0x11 组 | `[0:[0,2], 1:"Bluetooth", 2:[], 3:MAC(6B)]` 传输编号 2 |
+/// | 0x18 组 | `[0:[0,3], 1:"WiFiCarPlay", 2:[], 4:[]]` 传输编号 3 |
 ///
-/// | 参数 ID | 内容 | 来源 |
-/// |---------|------|------|
-/// | 0 | name 实参 | 调用方 |
-/// | 1 | `"CP-Receiver-1"` | 常量 |
-/// | 2 | `"OEM"` | 常量 |
-/// | 3 | `"SN000001"` | 常量 |
-/// | 4/5 | `"1.0.0"` | 常量（固件/硬件版本） |
-/// | 6..9 | Data（deviceID 十六进制解析出的字节） | 实参 |
-/// | 12/13 | `"en"` | 常量（语言） |
-/// | 0x10 组 | `[0:Data, 1:"USBHost", 2:nil, 3:Data, 4:nil]` | 传输能力 |
-/// | 0x11 组 | `[0:Data, 1:"Bluetooth", 2:nil, 3:Data]` | 传输能力 |
-/// | 0x18 组 | `[0:Data, 1:"WiFiCarPlay", 2:nil, 4:nil]` | 传输能力 |
-///
-/// 参数 6..9 的确切切分与屏幕/编解码能力声明（W×H、fps、AVC-only）留待真机
-/// 用诊断日志校准——iOS 的回应会直接暴露它期望的字段。
+/// 字符串参数**必须 NUL 结尾**（CarWithin `string()` = utf8 + 0x00）。
+/// param 6..9 是消息位掩码/电气参数，**不是放设备 ID 的地方**——早前误填导致
+/// iOS 收到 identification 后毫无回应（0.0.1-b65 真机实锤：发了 15 参数但零回包）。
 enum AccessoryMessages {
 
     // MARK: - identification
 
     /// 配件身份声明。发出去之后 iOS 才会知道"有台 CarPlay 车机接上了"。
-    static func identification(name: String, deviceID: String) -> LinkMessage {
-        let uid = Data(hexString: deviceID) ?? Data()
+    /// - Parameter mac: `"AA:BB:CC:DD:EE:FF"` 形式，解析出 6 字节
+    static func identification(name: String, mac: String) -> LinkMessage {
+        let macBytes = Data(hexString: mac) ?? Data(repeating: 0, count: 6)
+        // 字符串一律 NUL 结尾
+        let s: (UInt16, String) -> LinkParameter = { id, v in
+            LinkParameter(id: id, value: Data(v.utf8) + Data([0]))
+        }
 
         let usb = LinkParameter(id: 0x10, value: encodedGroup([
-            LinkParameter(id: 0, value: uid),                          // 设备字节
-            LinkParameter(id: 1, string: "USBHost"),                   // 传输名
-            LinkParameter(id: 2, value: Data()),                       // nil 占位
-            LinkParameter(id: 3, value: uid),
+            LinkParameter(id: 0, value: Data([0, 1])),   // 传输编号 1
+            s(1, "USBHost"),
+            LinkParameter(id: 2, value: Data()),
+            LinkParameter(id: 3, value: Data([1])),
             LinkParameter(id: 4, value: Data()),
         ]))
 
         let bluetooth = LinkParameter(id: 0x11, value: encodedGroup([
-            LinkParameter(id: 0, value: uid),
-            LinkParameter(id: 1, string: "Bluetooth"),
+            LinkParameter(id: 0, value: Data([0, 2])),   // 传输编号 2
+            s(1, "Bluetooth"),
             LinkParameter(id: 2, value: Data()),
-            LinkParameter(id: 3, value: uid),
+            LinkParameter(id: 3, value: macBytes),
         ]))
 
         let wifi = LinkParameter(id: 0x18, value: encodedGroup([
-            LinkParameter(id: 0, value: uid),
-            LinkParameter(id: 1, string: "WiFiCarPlay"),
+            LinkParameter(id: 0, value: Data([0, 3])),   // 传输编号 3
+            s(1, "WiFiCarPlay"),
             LinkParameter(id: 2, value: Data()),
             LinkParameter(id: 4, value: Data()),
         ]))
 
         return LinkMessage(id: 0x1D01, parameters: [
-            LinkParameter(id: 0, string: name),
-            LinkParameter(id: 1, string: "CP-Receiver-1"),
-            LinkParameter(id: 2, string: "OEM"),
-            LinkParameter(id: 3, string: "SN000001"),
-            LinkParameter(id: 4, string: "1.0.0"),
-            LinkParameter(id: 5, string: "1.0.0"),
-            LinkParameter(id: 6, value: uid),
-            LinkParameter(id: 7, value: uid),
-            LinkParameter(id: 8, value: uid),
-            LinkParameter(id: 9, value: uid),
-            LinkParameter(id: 12, string: "en"),
-            LinkParameter(id: 13, string: "en"),
+            s(0, name),
+            s(1, "CP-Receiver-1"),
+            s(2, "OEM"),
+            s(3, "SN000001"),
+            s(4, "1.0.0"),
+            s(5, "1.0.0"),
+            LinkParameter(id: 6, value: Data([0x43, 0x01])),   // MessagesReceived
+            LinkParameter(id: 7, value: Data([0x43, 0x00])),   // MessagesSent
+            LinkParameter(id: 8, value: Data([0x00])),
+            LinkParameter(id: 9, value: Data([0x00, 0x00])),
+            s(12, "en"),
+            s(13, "en"),
             usb, bluetooth, wifi,
         ])
     }
@@ -79,16 +85,20 @@ enum AccessoryMessages {
     // MARK: - startSession
 
     /// 把媒体会话指向 App 自己的 MediaTCPListener（同机回环）。
-    /// iOS 收到后会把 H.264/音频流连到 `address:port`。
     ///
-    /// 参数布局：param 0 = 地址（反汇编确证）；param 1..3 为最贴近
-    /// CarWithin 结构的重构（端口/设备ID/版本串），确切分组留待真机校准。
+    /// 对照 CarWithin `startSession`：param 0 = 地址组、param 2 = 端口（BE32）、
+    /// param 3 = deviceID、param 5 = sourceVersion；无线时 param 1 = Wi-Fi 组。
     static func startSession(address: String, port: UInt16, deviceID: String) -> LinkMessage {
+        let portBytes = Data([0, 0, UInt8(truncatingIfNeeded: port >> 8), UInt8(truncatingIfNeeded: port)])
+        let addressGroup = LinkParameter(id: 0, value: encodedGroup([
+            LinkParameter(id: 0, value: Data(address.utf8) + Data([0])),
+        ]))
         return LinkMessage(id: 0x4301, parameters: [
-            LinkParameter(id: 0, string: address),
-            LinkParameter(id: 1, uint: UInt64(port)),
-            LinkParameter(id: 2, string: deviceID),
-            LinkParameter(id: 3, string: "509.11"),
+            addressGroup,
+            LinkParameter(id: 2, value: portBytes),
+            LinkParameter(id: 3, value: Data(deviceID.utf8) + Data([0])),
+            LinkParameter(id: 4, value: Data([0])),
+            LinkParameter(id: 5, value: Data("509.11".utf8) + Data([0])),
         ])
     }
 

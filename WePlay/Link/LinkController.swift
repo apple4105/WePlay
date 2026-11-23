@@ -113,6 +113,7 @@ final class LinkController {
         diag.log("管线", "── M3: 虚拟 accessory ──")
 
         transport = DirectAccessoryTransport()
+        transport.identity = identity          // 供派生配件 MAC（identification 蓝牙组 + 连接 identifier）
         transport.onLog = { diag.log("传输", $0) }
         transport.onFailure = { [weak self] msg in
             diag.error("传输", msg)
@@ -128,17 +129,23 @@ final class LinkController {
             } else {
                 diag.log("管线", "虚拟 accessory 就绪（管线已推进，保持当前状态）")
             }
-            diag.log("管线", "发送 SYN + identification")
-            // 控制会话先同步（SYN），再报身份
-            self.sendRaw(LinkPacket(control: LinkPacket.controlSYN, sequence: 0,
-                                    sessionID: LinkPacket.controlSessionID).encode())
-            let name = (Bundle.main.infoDictionary?["CFBundleDisplayName"] as? String) ?? "CP-Receiver-1"
-            let certData = self.identity?.leafCertificate ?? Data()
-            let deviceID = SHA256.hash(data: certData).prefix(8)
-                .map { String(format: "%02X", $0) }.joined()
-            let ident = AccessoryMessages.identification(name: name, deviceID: deviceID)
-            diag.log("iAP2", "→ identification (0x1D01)，\(ident.parameters.count) 参数")
-            self.send(message: ident)
+            diag.log("管线", "发送 presence + SYN + identification")
+            // CarWithin SameDeviceProbe：**先发 presence 包**，0.1 秒后再发 SYN，再报身份。
+            // 少了 presence，iOS 的 iAP2 栈可能直接不认这条链路。
+            self.sendRaw(LinkPacket.presence)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                guard let self else { return }
+                // 控制会话先同步（SYN），payload 照 CarWithin（iAP2 链路选项）
+                let synPayload = Data([1, 5, 8, 0, 7, 0xd0, 0, 0xfa, 3, 3, 1, 0, 1])
+                self.sendRaw(LinkPacket(control: LinkPacket.controlSYN, sequence: 0,
+                                        sessionID: LinkPacket.controlSessionID,
+                                        payload: synPayload).encode())
+                let name = (Bundle.main.infoDictionary?["CFBundleDisplayName"] as? String) ?? "CP-Receiver-1"
+                let mac = self.transport.accessoryMAC
+                let ident = AccessoryMessages.identification(name: name, mac: mac)
+                diag.log("iAP2", "→ identification (0x1D01)，\(ident.parameters.count) 参数，MAC=\(mac)")
+                self.send(message: ident)
+            }
         }
 
         // LinkParser 解 iAP2 包，消息/原始数据都打日志
@@ -519,8 +526,8 @@ final class LinkController {
             diag.error("管线", "媒体监听端口未就绪，无法发 startSession")
             return
         }
-        let deviceID = SHA256.hash(data: identity?.leafCertificate ?? Data()).prefix(8)
-            .map { String(format: "%02X", $0) }.joined()
+        // CarWithin startSession：param 3 = deviceID（MAC 形串，与 identification 一致）
+        let deviceID = transport?.accessoryMAC ?? "02:00:00:00:00:01"
         let ss = AccessoryMessages.startSession(address: "127.0.0.1", port: port, deviceID: deviceID)
         diag.log("iAP2", "→ startSession (0x4301) 127.0.0.1:\(port)")
         send(message: ss)

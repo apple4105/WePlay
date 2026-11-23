@@ -47,6 +47,12 @@ struct LinkPacket: Equatable {
     /// 控制会话 ID
     static let controlSessionID: UInt8 = 0x00
 
+    /// iAP2 链路 presence 包（CarWithin `IAP2Packet.presence`）。
+    ///
+    /// 在 SYN 之前原样发出，**不是** `FF 5A` 包格式——是 6 字节固定签名。
+    /// 漏发它 iOS 的 iAP2 栈可能不认这条链路（CarWithin 是先发它、0.1 秒后才 SYN）。
+    static let presence = Data([0xFF, 0x55, 0x02, 0x00, 0xEE, 0x10])
+
     // MARK: 字段
 
     var control: UInt8

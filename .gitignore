@@ -30,3 +30,7 @@ __pycache__/
 *.pyc
 .DS_Store
 set_secrets.py
+
+# 第三方参考源码（本地研读用，禁止进公开仓库）
+carwithin_ref/
+oxp_stream_ref/
