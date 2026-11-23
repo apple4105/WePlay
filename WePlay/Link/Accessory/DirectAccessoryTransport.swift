@@ -63,13 +63,13 @@ final class DirectAccessoryTransport: NSObject {
     /// 传输类型枚举值——真机诊断时逐个尝试（错误分支会明说拒绝原因）
     private static let transportTypesToTry: [Int] = [2, 1, 0]
 
-    /// `createEndpoint…andProtocol:` 的取值。
+    /// `createEndpoint…andProtocol:` 的取值候选。
     ///
-    /// CarWithin `DirectAccessoryTransport.m` 传的是**整数 4**，不是字符串。
-    /// 传字符串协议名时 iOS 会静默拒绝端点——现象是"publish 已调用、isReady=true，
-    /// 但永远收不到 dataOutHandler 回调，也收不到任何 iAP2 数据"
-    /// （0.0.1-b65 真机实锤：identification 发出去 20 秒零回包）。
-    private static let endpointProtocol = 4
+    /// CarWithin `DirectAccessoryTransport.m` 传的是**整数 4**，不是字符串（传字符串
+    /// iOS 会静默拒绝端点）。但我们在 iOS 27.2 实测 protocol=4 也不返回 endpoint UUID，
+    /// 而 `ACCEndpoint_Protocol_t` 枚举值未公开——所以列候选逐个试，把每个的返回值
+    /// 都打进日志，一次上车拿全数据。4 排第一（CarWithin 实证可用）。
+    private static let endpointProtocolCandidates = [4, 1, 2, 3, 5, 6, 0]
 
     // MARK: - 运行时状态
 
@@ -116,26 +116,44 @@ final class DirectAccessoryTransport: NSObject {
         //    CarWithin 用 configuration.deviceID（MAC 形串）作 identifier；
         // 这里用证书派生的稳定 MAC 串，重开一致。
         let connectionID = accessoryMAC
-        connectionUUID = connectionID
         let createConnSel = NSSelectorFromString("createConnectionWithType:andIdentifier:")
-        if client.responds(to: createConnSel) {
-            // transportType 逐个尝试；v1 先取第一个
-            let type = Self.transportTypesToTry[0]
-            _ = client.perform(createConnSel, with: type, with: connectionID)
-            log("连接已创建 type=\(type) id=\(connectionID)")
-        } else {
+        guard client.responds(to: createConnSel) else {
             fail("createConnectionWithType:andIdentifier: selector missing.")
+            return
+        }
+        // CarWithin 同款：**检查 createConnection 的返回值**（必须是 NSString）。
+        // 连接没建起来的话，后面 createEndpoint 必然失败——必须先分开定位。
+        let type = Self.transportTypesToTry[0]
+        if let conn = client.perform(createConnSel, with: type, with: connectionID).takeUnretainedValue() as? String {
+            connectionUUID = conn
+            log("连接已创建 type=\(type) id=\(conn)")
+        } else {
+            // 连接没建成：试降级的 transportType 1（CarWithin 的 fallback）
+            if let conn = client.perform(createConnSel, with: 1, with: connectionID).takeUnretainedValue() as? String {
+                connectionUUID = conn
+                log("连接已创建（降级 type=1）id=\(conn)")
+            } else {
+                fail("createConnection type=\(type) 未返回连接 UUID——iOS 拒绝了配件连接")
+                return
+            }
+        }
+        guard let connUUID = connectionUUID else {
+            fail("连接 UUID 缺失")
             return
         }
 
         // 5. createEndpointWithTransportType:andProtocol:andIdentifier:
         //    andDataOutHandler:forConnectionWithUUID:publishConnection:
         //    endpoint UUID 用返回值，见 publishEndpoint 内说明
-        publishEndpoint(client: client, connectionUUID: connectionID)
+        publishEndpoint(client: client, connectionUUID: connUUID)
     }
 
     /// 发布 endpoint：把 dataOutHandler 闭包传给 CoreAccessories。
     /// handler 收到的 (NSString, NSString, NSData) = (connectionUUID, endpointUUID, 数据)。
+    ///
+    /// **逐个 protocol 试**：CarWithin 用 (transportType=2, protocol=4) 且可用，但我们在
+    /// iOS 27.2 实测该组合不返回 endpoint UUID。`ACCEndpoint_Protocol_t` 枚举值未公开，
+    /// 所以把每个组合的返回值都打进日志——一次上车拿全数据。
     private func publishEndpoint(client: AnyObject, connectionUUID: String) {
         let sel = NSSelectorFromString(
             "createEndpointWithTransportType:andProtocol:andIdentifier:andDataOutHandler:forConnectionWithUUID:publishConnection:"
@@ -145,33 +163,41 @@ final class DirectAccessoryTransport: NSObject {
             return
         }
 
+        // iOS 27 新增的变体（blacktop/ipsw-diffs 发现）——先探是否存在，只记录不强call
+        let newSel = NSSelectorFromString(
+            "createEndpointWithTransportType:andProtocol:andIdentifier:forConnectionWithUUID:withReply:"
+        )
+        log("iOS 27 新签名 createEndpoint…withReply: 存在 = \(client.responds(to: newSel))")
+
         let dataOutHandler: @convention(block) (NSString, NSString, Data) -> Void = {
             [weak self] _connectionUUID, _endpointUUID, data in
             self?.onData?(data)
         }
         let block = unsafeBitCast(dataOutHandler, to: AnyObject.self)
 
-        // CarWithin：andProtocol = 整数 4，andIdentifier = nil。
-        // 传字符串协议名 iOS 会静默拒绝——表现为"publish 已调用但永远收不到回调"。
-        let type = Self.transportTypesToTry[0]
-        let result = sendEndpointCreate(
-            to: client, sel: sel,
-            type: type,
-            protocolNumber: Self.endpointProtocol,
-            handler: block,
-            connectionUUID: connectionUUID,
-            publish: true
-        )
-
-        // **返回值就是 endpoint UUID**，必须拿来后续注数据用；自己编 UUID 会打空
-        guard let endpointID = result as? String, !endpointID.isEmpty else {
-            fail("createEndpoint 未返回 endpoint UUID——iOS 拒绝了 iAP2 端点（protocol=\(Self.endpointProtocol)）")
-            return
+        // 逐个 (transportType, protocol) 组合试；命中（返回非空 NSString）即停
+        for type in Self.transportTypesToTry {
+            for proto in Self.endpointProtocolCandidates {
+                let result = sendEndpointCreate(
+                    to: client, sel: sel,
+                    type: type,
+                    protocolNumber: proto,
+                    handler: block,
+                    connectionUUID: connectionUUID,
+                    publish: true
+                )
+                if let endpointID = result as? String, !endpointID.isEmpty {
+                    // **返回值就是 endpoint UUID**，必须拿来后续注数据用
+                    endpointUUID = endpointID
+                    isReady = true
+                    log("✅ publish 成功 type=\(type) protocol=\(proto) endpoint=\(endpointID)")
+                    onReady?()
+                    return
+                }
+                log("createEndpoint type=\(type) protocol=\(proto) → 无返回值")
+            }
         }
-        endpointUUID = endpointID
-        isReady = true
-        log("publish 成功（endpoint=\(endpointID)）")
-        onReady?()
+        fail("所有 (transportType, protocol) 组合都未返回 endpoint UUID——iOS 拒绝了 iAP2 端点")
     }
 
     // MARK: - 数据注入（配件 → iPhone）

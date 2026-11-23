@@ -90,6 +90,8 @@ final class LinkBootstrap: NSObject {
         credentialType = Link.typeNetworkBootstrap
         descriptorDiscovered = false
         rediscoveryCount = 0
+        cccdEnabled = false
+        didResendAfterCccd = false
     }
 
     /// 用户在 UI 里输入了配对码后调用。
@@ -109,6 +111,12 @@ final class LinkBootstrap: NSObject {
 
     /// 描述符是否发现成功（3 秒兜底订阅用）
     private var descriptorDiscovered = false
+
+    /// CCCD 是否已确认启用（启用后要按官方顺序补发请求）
+    private var cccdEnabled = false
+
+    /// 是否已经因"CCCD 启用"补发过请求（避免重复发）
+    private var didResendAfterCccd = false
 
     /// 凭证请求重试计数
     private var credentialAttempts = 0
@@ -176,6 +184,9 @@ final class LinkBootstrap: NSObject {
     private func scheduleReplyWatchdog() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
             guard let self, self.replyPending else { return }
+            // 链路状态 + CCCD 状态一起打：区分"链路死了"和"车机不理"
+            let linkState = self.peripheral?.state == .connected ? "已连接" : "非连接(\(self.peripheral?.state.rawValue ?? -1))"
+            self.onLog?("[link] 链路状态：\(linkState)；CCCD 已启用：\(self.cccdEnabled)；已补发：\(self.didResendAfterCccd)")
             guard self.credentialAttempts < 1 else {
                 // 第二轮也空：OpenXPlay 的对策是重新发现服务（车机 GATT 数据库
                 // 可能在连接后被重新发布，旧的 characteristic 句柄已失效）
@@ -208,6 +219,8 @@ final class LinkBootstrap: NSObject {
         credentialAttempts = 0
         credentialType = Link.typeNetworkBootstrap
         descriptorDiscovered = false
+        cccdEnabled = false
+        didResendAfterCccd = false
         phoneCharacteristic = nil
         headUnitCharacteristic = nil
         peripheral.discoverServices([Link.serviceUUID])
@@ -384,12 +397,48 @@ extension LinkBootstrap: CBPeripheralDelegate {
             let names = characteristic.descriptors?.map { $0.uuid.uuidString } ?? []
             onLog?("[link] 对端特征描述符：[\(names.joined(separator: ", "))]")
         }
-        if characteristic.properties.contains(.notify) {
+        enableHeadUnitNotifications(on: characteristic, via: peripheral)
+    }
+
+    /// 订阅对端特征的通知/指示。
+    ///
+    /// **先直接写 CCCD = 0x0002（指示 indications）**，不是 `setNotifyValue(true)`：
+    /// 1. iOS 的 `setNotifyValue(true)` 固定写 0x0001（notifications），我们无法指定值；
+    /// 2. 官方 Android 参考（BleExchange.kt）把收到的数据命名为 `indication(bytes)`，
+    ///    Android 侧启用指示写的就是 0x0002；
+    /// 3. b68 实机：`setNotifyValue(true)` 之后**收不到任何 CCCD 回调**，而对端特征
+    ///    读取被车机以 `CBATTErrorDomain Code=2 "Reading is not permitted"` 明确拒绝
+    ///    （属性 16 = notify，只支持订阅，读不了）。
+    /// 直接写描述符是 iOS 上唯一能发 0x0002 的途径。
+    private func enableHeadUnitNotifications(on characteristic: CBCharacteristic, via peripheral: CBPeripheral) {
+        guard let cccd = characteristic.descriptors?.first(where: { $0.uuid == Link.cccdUUID }) else {
+            onLog?("[link] 找不到 CCCD 描述符——退回 setNotifyValue(true)")
             peripheral.setNotifyValue(true, for: characteristic)
+            return
+        }
+        onLog?("[link] 直接写 CCCD = 0x0002（启用指示 indications）")
+        peripheral.writeValue(Data([0x02, 0x00]), for: cccd)
+    }
+
+    /// CCCD 描述符**写入**结果（直接写 0x0002 时走这里）
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor descriptor: CBDescriptor, error: Error?) {
+        guard descriptor.uuid == Link.cccdUUID else { return }
+        if let error {
+            onLog?("[link] ❌ CCCD 写入失败：\(error.localizedDescription)——退回 setNotifyValue(true)（0x0001 notifications）")
+            if let c = headUnitCharacteristic { peripheral.setNotifyValue(true, for: c) }
+        } else {
+            onLog?("[link] ✅ CCCD 已启用（值 \(descriptor.value?.hexString ?? "?")）")
+            resendRequestAfterSubscription()
         }
     }
 
-    /// CCCD 订阅结果（仅记录，不再用来放行请求）
+    /// CCCD 描述符读取结果
+    func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor descriptor: CBDescriptor, error: Error?) {
+        guard descriptor.uuid == Link.cccdUUID else { return }
+        onLog?("[link] CCCD 当前值 = \(descriptor.value?.hexString ?? "nil")")
+    }
+
+    /// CCCD 订阅结果（setNotifyValue 路径；仅记录 + 补发请求）
     func peripheral(
         _ peripheral: CBPeripheral,
         didUpdateNotificationStateFor characteristic: CBCharacteristic,
@@ -400,7 +449,23 @@ extension LinkBootstrap: CBPeripheralDelegate {
             onLog?("[link] CCCD 订阅失败：\(error.localizedDescription)（不影响已发出的请求）")
         } else {
             onLog?("[link] CCCD 订阅已确认（isNotifying=\(characteristic.isNotifying)）")
+            resendRequestAfterSubscription()
         }
+    }
+
+    /// CCCD 启用后按官方顺序补发一次 PhoneRequest。
+    ///
+    /// 官方顺序（BleExchange.kt）是**先订阅、后写请求**。我们为了不堵流程，
+    /// 在订阅确认前就先发了一次——车机很可能因此没处理。订阅一确认就补发，
+    /// 且只补发一次（`didResendAfterCccd` 防重）。
+    private func resendRequestAfterSubscription() {
+        guard !didResendAfterCccd else { return }
+        didResendAfterCccd = true
+        cccdEnabled = true
+        credentialAttempts = 0
+        credentialType = Link.typeNetworkBootstrap
+        onLog?("[link] 按官方顺序补发 PhoneRequest（订阅已完成）")
+        requestCredentials()
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
