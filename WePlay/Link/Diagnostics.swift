@@ -59,7 +59,7 @@ final class Diagnostics {
             try? Data().write(to: url)
         }
         logFile = try? FileHandle(forWritingTo: url)
-        logFile?.seekToEnd(ofFile: 0)
+        try? logFile?.seekToEnd()          // 定位到文件末尾，追加写
     }
 
     /// 把上次会话的日志尾部载入缓冲，并在 UI 里标出会话边界。
