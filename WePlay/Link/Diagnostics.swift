@@ -70,6 +70,13 @@ final class Diagnostics {
 
     // MARK: - 导出
 
+    /// 当前缓冲的日志条数（UI 显示"共 N 条"用）
+    var lineCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return buffer.count
+    }
+
     /// 完整诊断文本（UI 导出按钮调用）
     func exportText() -> String {
         lock.lock()
@@ -101,5 +108,21 @@ final class Diagnostics {
         let text = exportText()
         let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         try? text.write(to: dir.appendingPathComponent("diagnostics.log"), atomically: true, encoding: .utf8)
+    }
+
+    /// 把完整报告写成 .txt 临时文件，供分享/AirDrop/存文件使用。
+    ///
+    /// 比直接分享字符串可靠：长文本走 AirDrop/微信经常被截断或失败，
+    /// 文件附件不会。
+    func exportFileURL() -> URL? {
+        let text = exportText()
+        let name = "weplay-diag-\(Int(Date().timeIntervalSince1970)).txt"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        do {
+            try text.write(to: url, atomically: true, encoding: .utf8)
+            return url
+        } catch {
+            return nil
+        }
     }
 }
