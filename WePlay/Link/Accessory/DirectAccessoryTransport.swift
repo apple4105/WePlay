@@ -115,7 +115,6 @@ final class DirectAccessoryTransport: NSObject {
         // 4. createConnectionWithType:andIdentifier:（实例方法）
         //    CarWithin 用 configuration.deviceID（MAC 形串）作 identifier；
         // 这里用证书派生的稳定 MAC 串，重开一致。
-        let connectionID = accessoryMAC
         let createConnSel = NSSelectorFromString("createConnectionWithType:andIdentifier:")
         guard client.responds(to: createConnSel) else {
             fail("createConnectionWithType:andIdentifier: selector missing.")
@@ -123,24 +122,26 @@ final class DirectAccessoryTransport: NSObject {
         }
         // CarWithin 同款：**检查 createConnection 的返回值**（必须是 NSString）。
         // 连接没建起来的话，后面 createEndpoint 必然失败——必须先分开定位。
-        let type = Self.transportTypesToTry[0]
-        if let conn = client.perform(createConnSel, with: type, with: connectionID).takeUnretainedValue() as? String {
-            connectionUUID = conn
-            log("连接已创建 type=\(type) id=\(conn)")
-        } else {
-            // 连接没建成：试降级的 transportType 1（CarWithin 的 fallback）
-            if let conn = client.perform(createConnSel, with: 1, with: connectionID).takeUnretainedValue() as? String {
-                connectionUUID = conn
-                log("连接已创建（降级 type=1）id=\(conn)")
-            } else {
-                fail("createConnection type=\(type) 未返回连接 UUID——iOS 拒绝了配件连接")
-                return
+        //
+        // ⚠️ 必须用 objc_msgSend 函数指针强转，**不能用 `perform(_:with:with:)`**：
+        // `perform` 返回 `Unmanaged<AnyObject>!`，Obj-C 方法返回 nil 时
+        // `.takeUnretainedValue()` 会触发 "Unexpectedly found nil" 直接闪退
+        // （0.0.1-b71 实锤：点「连接车机」立刻崩）。函数指针强转的 `AnyObject?`
+        // 是 nil 安全的，和 CarWithin 的 `((id(*)(id,SEL,NSUInteger,id))objc_msgSend)` 等价。
+        var connectionID: String?
+        for type in Self.transportTypesToTry {
+            if let conn = sendCreateConnection(to: client, type: type, identifier: accessoryMAC) {
+                connectionID = conn
+                log("连接已创建 type=\(type) id=\(conn)")
+                break
             }
+            log("createConnection type=\(type) → 返回 nil")
         }
-        guard let connUUID = connectionUUID else {
-            fail("连接 UUID 缺失")
+        guard let connUUID = connectionID else {
+            fail("createConnection 所有 transportType 都返回 nil——iOS 拒绝了配件连接（CarWithin 同款结论：该签名 App 可能无权限访问私有 transport）")
             return
         }
+        connectionUUID = connUUID
 
         // 5. createEndpointWithTransportType:andProtocol:andIdentifier:
         //    andDataOutHandler:forConnectionWithUUID:publishConnection:
@@ -264,6 +265,24 @@ final class DirectAccessoryTransport: NSObject {
 }
 
 // MARK: - Obj-C runtime 桥接
+
+/// `createConnectionWithType:andIdentifier:` 的 nil 安全直调。
+///
+/// **为什么不能用 `perform(_:with:with:)`**：它返回 `Unmanaged<AnyObject>!`，
+/// Obj-C 方法返回 nil 时 `.takeUnretainedValue()` 会抛
+/// "Unexpectedly found nil while unwrapping an Optional value" 直接闪退
+/// （0.0.1-b71 实锤：点「连接车机」立刻崩，且崩在连错误日志都没来得及打）。
+/// 函数指针强转出的 `AnyObject?` 是 nil 安全的，与 CarWithin 的
+/// `((id(*)(id,SEL,NSUInteger,id))objc_msgSend)(client, sel, 2, identifier)` 等价。
+func sendCreateConnection(to client: AnyObject, type: Int, identifier: String) -> String? {
+    let fn = unsafeBitCast(
+        dlsym(dlopen(nil, RTLD_NOW), "objc_msgSend"),
+        to: (@convention(c) (AnyObject, Selector, Int, NSString) -> AnyObject?).self
+    )
+    return fn(client,
+              NSSelectorFromString("createConnectionWithType:andIdentifier:"),
+              type, identifier as NSString) as? String
+}
 
 /// `createEndpointWithTransportType:andProtocol:andIdentifier:andDataOutHandler:
 /// forConnectionWithUUID:publishConnection:` 的多参直调。

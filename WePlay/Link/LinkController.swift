@@ -27,7 +27,13 @@ final class PipelineState: ObservableObject {
     @Published var pinRequired = false
     /// 需要用户手动加入车机 Wi-Fi（免费账号无 HotspotConfiguration entitlement）。
     /// 主页据此显示 SSID/密码卡片，用户去「设置 → Wi-Fi」连一次。
-    @Published var manualJoin: (ssid: String, psk: String)?
+    @Published var manualJoin: ManualJoinInfo?
+}
+
+/// 手动加入车机 Wi-Fi 的凭证。
+struct ManualJoinInfo {
+    let ssid: String
+    let psk: String
 }
 
 final class LinkController {
@@ -378,7 +384,7 @@ final class LinkController {
             // 把凭证推到主页卡片（可复制），用户连好后按「连接车机」走缓存凭证直连。
             DispatchQueue.main.async {
                 self?.phase = .wifiManualJoin
-                PipelineState.shared.manualJoin = (ssid, psk)
+                PipelineState.shared.manualJoin = ManualJoinInfo(ssid: ssid, psk: psk)
             }
         }
         wifiJoiner.join(ssid: reply.ssid, psk: reply.psk)
