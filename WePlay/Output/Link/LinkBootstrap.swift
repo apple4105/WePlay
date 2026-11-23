@@ -400,37 +400,21 @@ extension LinkBootstrap: CBPeripheralDelegate {
         enableHeadUnitNotifications(on: characteristic, via: peripheral)
     }
 
-    /// 订阅对端特征的通知/指示。
+    /// 订阅对端特征的通知。
     ///
-    /// **先直接写 CCCD = 0x0002（指示 indications）**，不是 `setNotifyValue(true)`：
-    /// 1. iOS 的 `setNotifyValue(true)` 固定写 0x0001（notifications），我们无法指定值；
-    /// 2. 官方 Android 参考（BleExchange.kt）把收到的数据命名为 `indication(bytes)`，
-    ///    Android 侧启用指示写的就是 0x0002；
-    /// 3. b68 实机：`setNotifyValue(true)` 之后**收不到任何 CCCD 回调**，而对端特征
-    ///    读取被车机以 `CBATTErrorDomain Code=2 "Reading is not permitted"` 明确拒绝
-    ///    （属性 16 = notify，只支持订阅，读不了）。
-    /// 直接写描述符是 iOS 上唯一能发 0x0002 的途径。
+    /// 用标准的 `setNotifyValue(true)`，**不直接写 CCCD 描述符**：
+    /// b77 实测 `peripheral.writeValue(_:for: CBDescriptor)` 一调就崩（四个会话全部
+    /// 断在"直接写 CCCD = 0x0002"那一行之后），而 b68 的 `setNotifyValue(true)` 不崩。
+    ///
+    /// 代价：iOS 的 `setNotifyValue(true)` 固定写 0x0001（notifications），无法指定
+    /// 0x0002（indications）。想验证车机是否只认 0x0002，用 nRF Connect 手动写
+    /// CCCD——它还能把 iOS 藏起来的 ATT 错误码显示出来。
     private func enableHeadUnitNotifications(on characteristic: CBCharacteristic, via peripheral: CBPeripheral) {
-        guard let cccd = characteristic.descriptors?.first(where: { $0.uuid == Link.cccdUUID }) else {
-            onLog?("[link] 找不到 CCCD 描述符——退回 setNotifyValue(true)")
+        if characteristic.properties.contains(.notify) {
+            onLog?("[link] setNotifyValue(true)（订阅通知，CCCD 0x0001）")
             peripheral.setNotifyValue(true, for: characteristic)
-            return
-        }
-        onLog?("[link] 直接写 CCCD = 0x0002（启用指示 indications）")
-        peripheral.writeValue(Data([0x02, 0x00]), for: cccd)
-    }
-
-    /// CCCD 描述符**写入**结果（直接写 0x0002 时走这里）
-    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor descriptor: CBDescriptor, error: Error?) {
-        guard descriptor.uuid == Link.cccdUUID else { return }
-        // descriptor.value 是 Any?，要先转 Data
-        let valueHex = (descriptor.value as? Data)?.hexString ?? "nil"
-        if let error {
-            onLog?("[link] ❌ CCCD 写入失败：\(error.localizedDescription)——退回 setNotifyValue(true)（0x0001 notifications）")
-            if let c = headUnitCharacteristic { peripheral.setNotifyValue(true, for: c) }
         } else {
-            onLog?("[link] ✅ CCCD 已启用（值 \(valueHex)）")
-            resendRequestAfterSubscription()
+            onLog?("[link] 对端特征无 notify 属性（属性 \(characteristic.properties.rawValue)），无法订阅")
         }
     }
 
@@ -438,7 +422,7 @@ extension LinkBootstrap: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor descriptor: CBDescriptor, error: Error?) {
         guard descriptor.uuid == Link.cccdUUID else { return }
         let valueHex = (descriptor.value as? Data)?.hexString ?? "nil"
-        onLog?("[link] CCCD 当前值 = \(valueHex)")
+        onLog?("[link] CCCD 当前值 = \(valueHex)（0x0001=notify / 0x0002=indicate）")
     }
 
     /// CCCD 订阅结果（setNotifyValue 路径；仅记录 + 补发请求）
