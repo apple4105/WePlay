@@ -39,8 +39,14 @@ final class LinkBootstrap: NSObject {
     private var phoneCharacteristic: CBCharacteristic?
     private var headUnitCharacteristic: CBCharacteristic?
 
-    /// 自己的蓝牙 MAC（PhoneRequest.mac 要用；取不到就填占位并告警）
-    private var selfMAC: String = "02:00:00:00:00:00"
+    /// 配件 MAC（下发给车机）。由 LinkController 按证书派生后注入，
+    /// 形如 `02:xx:xx:xx:xx:xx`（本地管理的单播地址，和真实手机实现一致）。
+    var accessoryMAC: String = "02:00:00:00:00:00"
+
+    /// Client Info 的 `id`：**6 位十六进制**（真实手机是 "a1b2c3" 这种，不是 UUID）
+    var clientID: String = "000001"
+
+    private var selfMAC: String { accessoryMAC }
 
     /// 诊断期：每个周围设备只记一次，避免 AllowDuplicates 刷屏
     private var loggedPeripherals = Set<UUID>()
@@ -97,12 +103,17 @@ final class LinkBootstrap: NSObject {
 
     /// 用户在 UI 里输入了配对码后调用。
     ///
-    /// 官方流程（oxp-clink ble.rs）确认：**BLE 建网阶段不需要配对码**——PhoneRequest
-    /// 直接换 HeadUnitReply。配对码属于后续 Carlink 认证（手机拨 57209）阶段。
-    /// 这里先把码存下来并全量打日志，供认证阶段使用和联调对照。
+    /// **BLE 阶段就要用**：Client Info 的 `pinCodeOrAuthentication` 必须带车机屏幕上
+    /// 的 6 位配对码（首次配对），车机才会推 Server Info（凭证）。
+    /// 依据 ft-app `IccoaClientProfile.kt` 注释「QUICK GATT advertises a trusted
+    /// client without replaying an obsolete **six-digit PIN**」——已配对才免码。
     func submitPinCode(_ code: String) {
         lastPinCode = code
-        onLog?("[link] 用户输入配对码：\(code)（长度 \(code.count)）——BLE 阶段不用它，留给 Carlink 认证")
+        onLog?("[link] 用户输入配对码：\(code)（长度 \(code.count)）——带进 Client Info 重发")
+        guard isConnected, credentialWriteStarted else { return }
+        // 重新握手：重置重试计数，带上配对码再写一次
+        credentialAttempts = 0
+        requestCredentials()
     }
 
     // MARK: - 内部
@@ -139,35 +150,46 @@ final class LinkBootstrap: NSObject {
             onFailure?(LinkError.characteristicMissing("phone \(Link.phoneCharacteristicUUID)"))
             return
         }
-        let request = Link.PhoneRequest(
-            id: UUID().uuidString,
-            name: HostIdentity.deviceName,
-            // 车机屏幕显示的是 **model** 字段，不是 name（b80 实锤：车机显示
-            // "正在连接 iPhone"，而我们发的是 model=UIDevice.current.model="iPhone"）。
-            // 改成 WePlay，车机就会显示"正在连接 WePlay"。
-            model: HostIdentity.deviceName,
-            band: 0,
-            mac: selfMAC,
-            type: credentialType
-        )
         do {
             credentialWriteStarted = true
-            // 字段顺序敏感（oxp-clink ble.rs：Kotlin 插入序，type 恒最后）——手工拼，
-            // Swift Codable 的键序不保证
+            // **Client Info 按真实手机实现的字段与顺序**（ft-app `IccoaClientProfile.kt`）：
+            //   id, model, name, [pinCodeOrAuthentication], band, mac, type, manufactures, channel
+            //
+            // 与之前的关键差异（每条都有实证）：
+            // · `id` 是 **6 位十六进制**，不是 UUID（真实手机就是 "a1b2c3" 这种）
+            // · `manufactures` = "Xiaomi"——ft-app 注释「Compatibility identity for UCAR receivers」，
+            //   车机是 UCAR 系，很可能按厂商判断
+            // · `band` = 1（"band=1 表示支持 5GHz"）
+            // · `channel` = 1
+            // · `type` 是网络类型（1001=P2P GO / 1002=SoftAP），不是"第几轮请求"
+            // · **`pinCodeOrAuthentication`：首次配对必须带上车机屏幕上的 6 位配对码**。
+            //   ft-app 注释「QUICK GATT advertises a trusted client without replaying an
+            //   obsolete **six-digit PIN**」——首次要 PIN、已配对才用 quick 变体。
+            //   这解释了车机为何一直"正在连接"：它显示了配对码在等我们回传。
             let esc: (String) -> String = { s in
-                let d = try! JSONEncoder().encode(s)
+                let d = (try? JSONEncoder().encode(s)) ?? Data()
                 return String(data: d, encoding: .utf8) ?? "\"\(s)\""
             }
-            let json = Data("""
-            {"id":\(esc(request.id)),"name":\(esc(request.name)),"model":\(esc(request.model)),"band":\(request.band),"mac":\(esc(request.mac.lowercased())),"type":\(request.type)}
-            """.utf8)
+            var fields: [String] = [
+                "\"id\":\(esc(clientID))",
+                "\"model\":\(esc(HostIdentity.deviceName))",
+                "\"name\":\(esc(HostIdentity.deviceName))",
+            ]
+            if let pin = lastPinCode, !pin.isEmpty {
+                fields.append("\"pinCodeOrAuthentication\":\(esc(pin))")
+            }
+            fields.append("\"band\":1")
+            fields.append("\"mac\":\(esc(accessoryMAC.lowercased()))")
+            fields.append("\"type\":\(credentialType)")
+            fields.append("\"manufactures\":\"Xiaomi\"")
+            fields.append("\"channel\":1")
+            let json = Data(("{" + fields.joined(separator: ",") + "}").utf8)
 
             // **第一轮用 withResponse**——和官方 Android 的 `gatt.write()`（默认
             // WRITE_TYPE_DEFAULT = 需确认）一致。这一轮最有诊断价值：
             //   · 回 `写特征成功` → 车机确实收到请求，问题在后面
             //   · 回 `写特征失败: <ATT code>` → 直接告诉我们车机拒绝的原因
             //   · 完全静默 → 写入没发出去（队列被堵或链路异常）
-            // 第二轮换 withoutResponse + type=1002 兜底。
             let maxWithout = peripheral.maximumWriteValueLength(for: .withoutResponse)
             let maxWith = peripheral.maximumWriteValueLength(for: .withResponse)
             let writeType: CBCharacteristicWriteType =
@@ -449,10 +471,15 @@ extension LinkBootstrap: CBPeripheralDelegate {
         if let error {
             onLog?("[link] ❌ CCCD 写入失败：\(error.localizedDescription)——无法用 0x0002，凭证可能拿不到")
         } else {
-            onLog?("[link] ✅ CCCD 已设（值 \(valueHex)，0200 = 指示）——现在写 PhoneRequest")
+            onLog?("[link] ✅ CCCD 已设（值 \(valueHex)，0200 = 指示）")
         }
-        // 无论 CCCD 成败都要写请求：车机收到 Client Info 就立刻推 Server Info，
-        // 订阅失败时至少还能拿到日志（凭证会丢，但能定位）。
+        // 订阅已成立：**先把车机屏幕上的 6 位配对码要过来**（首次配对必须带
+        // pinCodeOrAuthentication），同时先发一次不带码的 Client Info 作为兜底
+        // （已配对过的车机会走 quick 路径直接回凭证）。
+        if lastPinCode == nil {
+            onLog?("[link] 首次配对：需要车机屏幕上的 6 位配对码（已请 UI 弹出输入）")
+            onPinCodeRequired?("")
+        }
         requestCredentials()
     }
 

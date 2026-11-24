@@ -388,6 +388,13 @@ final class LinkController {
         let diag = Diagnostics.shared
 
         bleBootstrap = LinkBootstrap()
+        // Client Info 的身份字段：真实手机发的是
+        //   id = 6 位十六进制、mac = 本地管理单播地址、manufactures = "Xiaomi"
+        // （依据 ft-app `IccoaClientProfile.kt`，注释写明是给 UCAR 车机的兼容身份）
+        let mac = transport?.accessoryMAC ?? "02:00:00:00:00:00"
+        bleBootstrap.accessoryMAC = mac
+        let digest = SHA256.hash(data: identity?.leafCertificate ?? Data())
+        bleBootstrap.clientID = digest.prefix(3).map { String(format: "%02x", $0) }.joined()
         bleBootstrap.onLog = { diag.log("BLE", $0) }
         bleBootstrap.onFailure = { diag.error("BLE", String(describing: $0)) }
         bleBootstrap.onCredentials = { [weak self] reply in
@@ -401,7 +408,9 @@ final class LinkController {
         }
         // 配对码由 UI 输入后调 bleBootstrap.submitPinCode(_:)
         bleBootstrap.onPinCodeRequired = { code in
-            diag.log("BLE", "车机请求配对码：\(code)（请在车机屏幕查看后输入）")
+            diag.log("BLE", "车机要求配对码——请查看车机屏幕上的 6 位数字并输入")
+            DispatchQueue.main.async { PipelineState.shared.pinRequired = true }
+            _ = code
         }
 
         let foreground = UIApplication.shared.applicationState == .active
@@ -611,7 +620,10 @@ final class LinkController {
 
     /// UI 配对码输入 → Carlink 认证续跑
     func submitPin(_ code: String) {
-        Diagnostics.shared.log("Carlink", "用户输入配对码（\(code.count) 位）")
+        Diagnostics.shared.log("配对码", "用户输入（\(code.count) 位）")
+        // BLE 首次配对阶段要用（Client Info 的 pinCodeOrAuthentication）；
+        // Carlink 认证阶段也要用，两条路都喂一遍。
+        bleBootstrap?.submitPinCode(code)
         carlinkSession?.submitPin(code)
         PipelineState.shared.pinRequired = false
     }
