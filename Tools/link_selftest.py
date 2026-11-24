@@ -25,17 +25,19 @@ def verify(covered: bytes, ck: int) -> bool:
 
 
 def encode_packet(control, sequence, acknowledgement, session_id, payload=b""):
-    # 总长先定下来（9 头 + 载荷 + 1 载荷校验），头校验必须覆盖真实长度
-    total = HEADER + len(payload) + 1
+    # 无载荷帧总长 9（不追加载荷校验）；有载荷时再加 载荷 + 载荷校验
+    total = HEADER if not payload else HEADER + len(payload) + 1
     out = bytearray(SOP)
     out += struct.pack(">H", total)         # 长度大端
     out.append(control)
     out.append(sequence)
     out.append(acknowledgement)             # 确认号 1 字节
     out.append(session_id)                  # 会话 ID 1 字节（控制会话 = 0x00）
-    out.append(checksum(bytes(out[2:8])))   # 头校验覆盖 偏移2..7（6 字节，不含 SOP）
-    out += payload
-    out.append(checksum(payload))
+    # 头校验覆盖全部 8 个头部字节（含 FF 5A）——carvex 固件规范 R-2.7
+    out.append(checksum(bytes(out[:8])))
+    if payload:
+        out += payload
+        out.append(checksum(payload))
     assert len(out) == total, (len(out), total)
     return bytes(out)
 
@@ -46,17 +48,22 @@ def decode_packet(data: bytes):
     if data[0:2] != SOP:
         return ("badSync", None)
     length = struct.unpack_from(">H", data, 2)[0]
-    if length < HEADER + 1:
+    # 合法长度：9（无载荷）或 >= 11；10 非法
+    if length < HEADER or length == HEADER + 1:
         return ("badSync", None)
     if len(data) < length:
         return ("needMore", None)
     control, seq, ack, session = data[4], data[5], data[6], data[7]
     hdr_ck = data[8]
-    if not verify(data[2:8], hdr_ck):
+    # 头校验覆盖全部 8 个头部字节（含 SOP）——固件规范 R-2.7
+    if not verify(data[:8], hdr_ck):
         return ("badSync", None)
-    payload = data[HEADER:length - 1]
-    if not verify(payload, data[length - 1]):
-        return ("badSync", None)
+    if length == HEADER:
+        payload = b""
+    else:
+        payload = data[HEADER:length - 1]
+        if not verify(payload, data[length - 1]):
+            return ("badSync", None)
     return ("packet", dict(control=control, sequence=seq, acknowledgement=ack,
                            session=session, payload=payload, consumed=length))
 

@@ -96,10 +96,21 @@ struct LinkPacket: Equatable {
     // MARK: 编解码
 
     /// 编码成完整字节流（含 SOP、两个校验）。
+    ///
+    /// 两个曾经导致 iOS **静默丢弃我们所有包**的错误，已按固件规范修正：
+    ///
+    /// 1. **头校验必须覆盖全部 8 个头部字节，含 `FF 5A`**
+    ///    （carvex 固件规范 `iap2_link_establish/spec/02` R-2.7「头部校验覆盖全部
+    ///    8 个头部字节（含 FF 5A）」，R-2.12 伪代码 `iap2_hdr_checksum =
+    ///    checksum(hdr, 8, type)`）。原来只覆盖偏移 2..7 的 6 字节，漏了同步字节，
+    ///    于是每帧校验都错——这就是"presence 有回显（它没有校验和）、SYN 与
+    ///    identification 全部零响应"的真因。
+    /// 2. **无载荷帧不追加载荷校验**（R-2.1：总长 9，不追加空载荷校验）。
+    ///    原来无条件追一个 0 字节变成 10 字节，而 10 字节在解析侧是非法长度。
     func encode() -> Data {
-        // 总长先定下来（9 字节头 + 载荷 + 1 字节载荷校验）——
-        // 头校验覆盖真实长度，所以必须在写长度字段之后、算校验之前把长度确定好。
-        let total = Self.headerSize + payload.count + 1
+        // 无载荷时总长 9（SOP2+长度2+控制1+序号1+确认1+会话1+头校验1）；
+        // 有载荷时再加 载荷 + 载荷校验。
+        let total = Self.headerSize + (payload.isEmpty ? 0 : payload.count + 1)
 
         var out = Data(capacity: total)
         out.append(Self.sop.0)
@@ -110,11 +121,13 @@ struct LinkPacket: Equatable {
         out.append(acknowledgement)
         out.append(sessionID)
 
-        // 头校验覆盖 偏移 2..7（长度+控制+序列+确认号+会话ID 共 6 字节，不含 SOP）
-        out.append(Self.checksum(out.suffix(6)))
+        // 头校验覆盖全部 8 个头部字节（含 FF 5A）——R-2.7
+        out.append(Self.checksum(out))
 
-        out.append(payload)
-        out.append(Self.checksum(payload))
+        if !payload.isEmpty {
+            out.append(payload)
+            out.append(Self.checksum(payload))
+        }
 
         assert(out.count == total)
         return out
@@ -138,7 +151,10 @@ struct LinkPacket: Equatable {
         }
 
         let length = data.be16(at: 2)
-        guard length >= headerSize + 1 else { return .badSync }   // 至少有载荷校验位
+        // 合法长度：9（无载荷，只有头+头校验）或 >= 11（头9 + 载荷 + 载荷校验）。
+        // 10 是非法值（CarWithin 的解析器同样显式拒绝 length==10）。
+        guard length >= headerSize, length != headerSize + 1 else { return .badSync }
+        guard length > headerSize || data.count >= headerSize else { return .needMore }
         guard data.count >= length else { return .needMore }
 
         let base = data.startIndex
@@ -148,8 +164,17 @@ struct LinkPacket: Equatable {
         let session = data[base + 7]
         let headerChecksum = data[base + 8]
 
-        let headerCovered = data[base + 2 ..< base + 8]
+        // 头校验覆盖全部 8 个头部字节（含 FF 5A）——固件规范 R-2.7
+        let headerCovered = data[base ..< base + 8]
         guard verify(headerCovered, checksum: headerChecksum) else { return .badSync }
+
+        // 无载荷帧（长度 9）没有载荷校验
+        guard length > headerSize else {
+            return .packet(LinkPacket(control: controlByte, sequence: seq,
+                                      acknowledgement: ack, sessionID: session,
+                                      payload: Data()),
+                           consumed: length)
+        }
 
         let payloadStart = base + headerSize
         let payloadEnd = base + length - 1        // 最后 1 字节是载荷校验
