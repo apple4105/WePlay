@@ -157,37 +157,31 @@ final class LinkBootstrap: NSObject {
         }
         do {
             credentialWriteStarted = true
-            // **Client Info 按真实手机实现的字段与顺序**（ft-app `IccoaClientProfile.kt`）：
-            //   id, model, name, [pinCodeOrAuthentication], band, mac, type, manufactures, channel
+            // **Client Info 退回"车机会有反应"的那一版，只多带一个配对码。**
             //
-            // 与之前的关键差异（每条都有实证）：
-            // · `id` 是 **6 位十六进制**，不是 UUID（真实手机就是 "a1b2c3" 这种）
-            // · `manufactures` = "Xiaomi"——ft-app 注释「Compatibility identity for UCAR receivers」，
-            //   车机是 UCAR 系，很可能按厂商判断
-            // · `band` = 1（"band=1 表示支持 5GHz"）
-            // · `channel` = 1
-            // · `type` 是网络类型（1001=P2P GO / 1002=SoftAP），不是"第几轮请求"
-            // · **`pinCodeOrAuthentication`：首次配对必须带上车机屏幕上的 6 位配对码**。
-            //   ft-app 注释「QUICK GATT advertises a trusted client without replaying an
-            //   obsolete **six-digit PIN**」——首次要 PIN、已配对才用 quick 变体。
-            //   这解释了车机为何一直"正在连接"：它显示了配对码在等我们回传。
+            // 依据：b80 用下面这段 JSON 时车机会显示「正在连接 iPhone」；b89 我一次改了
+            // 5 个字段（id→6位十六进制、model→WePlay、band→1、mac→派生值、
+            // 加 manufactures/channel）后车机完全没反应了。一次改太多无法定位，
+            // 而且 `02:00:00:00:00:00` 是手册明确写的隐私占位 MAC（"若双方没有明确
+            // 协商真实 Wi-Fi 地址，参考实现使用 02:00:00:00:00:00"）。
+            //
+            // 唯一新增：`pinCodeOrAuthentication`（首次配对的车机屏幕 6 位码）。
+            // 放在 `type` 之前——手册强调 type 恒为最后一项。
             let esc: (String) -> String = { s in
                 let d = (try? JSONEncoder().encode(s)) ?? Data()
                 return String(data: d, encoding: .utf8) ?? "\"\(s)\""
             }
             var fields: [String] = [
-                "\"id\":\(esc(clientID))",
-                "\"model\":\(esc(HostIdentity.deviceName))",
+                "\"id\":\(esc(UUID().uuidString))",
                 "\"name\":\(esc(HostIdentity.deviceName))",
+                "\"model\":\"iPhone\"",
+                "\"band\":0",
+                "\"mac\":\"02:00:00:00:00:00\"",
             ]
             if let pin = lastPinCode, !pin.isEmpty {
                 fields.append("\"pinCodeOrAuthentication\":\(esc(pin))")
             }
-            fields.append("\"band\":1")
-            fields.append("\"mac\":\(esc(accessoryMAC.lowercased()))")
             fields.append("\"type\":\(credentialType)")
-            fields.append("\"manufactures\":\"Xiaomi\"")
-            fields.append("\"channel\":1")
             let json = Data(("{" + fields.joined(separator: ",") + "}").utf8)
 
             // **第一轮用 withResponse**——和官方 Android 的 `gatt.write()`（默认
@@ -458,8 +452,14 @@ extension LinkBootstrap: CBPeripheralDelegate {
         // 直接写 CBDescriptor 会崩）。
         //
         // 改用标准 `setNotifyValue(true)`：nRF Connect 实测本车机 **CCCD 写会成功**
-        // （读回 `01 00`，UI 显示 "Notifications are Enabled"），所以标准 API 能走通。
-        enableHeadUnitNotifications(on: characteristic, via: peripheral)
+        // （读回 `01 00`），所以标准 API 能走通。
+        //
+        // **必须挪出委托回调**：b89 在 didDiscoverDescriptorsFor 里直接调，
+        // `CCCD 已启用` 一直是 false（静默失败）。nRF 是在用户点按（回调之外）时写的
+        // 才成功——CoreBluetooth 不接受在一个回调内部重入发起新的 GATT 操作。
+        DispatchQueue.main.async {
+            self.enableHeadUnitNotifications(on: characteristic, via: peripheral)
+        }
     }
 
     /// 订阅对端特征的通知（标准 API）。
