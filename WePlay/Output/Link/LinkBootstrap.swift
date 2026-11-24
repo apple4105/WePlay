@@ -154,16 +154,19 @@ final class LinkBootstrap: NSObject {
             {"id":\(esc(request.id)),"name":\(esc(request.name)),"model":\(esc(request.model)),"band":\(request.band),"mac":\(esc(request.mac.lowercased())),"type":\(request.type)}
             """.utf8)
 
-            // 官方第一件事是 requestMtu(512)；iOS 不暴露该 API，但**写入模式可以绕开
-            // Write Response**——车机嵌入式 BLE 栈普遍不回写确认（b57/b65 两次都静默
-            // 在第一个 GATT 写入上）。withoutResponse 不等车机 ACK，请求照样送达。
+            // **第一轮用 withResponse**——和官方 Android 的 `gatt.write()`（默认
+            // WRITE_TYPE_DEFAULT = 需确认）一致。这一轮最有诊断价值：
+            //   · 回 `写特征成功` → 车机确实收到请求，问题在后面
+            //   · 回 `写特征失败: <ATT code>` → 直接告诉我们车机拒绝的原因
+            //   · 完全静默 → 写入没发出去（队列被堵或链路异常）
+            // 第二轮换 withoutResponse + type=1002 兜底。
             let maxWithout = peripheral.maximumWriteValueLength(for: .withoutResponse)
             let maxWith = peripheral.maximumWriteValueLength(for: .withResponse)
-            let preferWithout = credentialAttempts == 0 && json.count <= maxWithout
-            let writeType: CBCharacteristicWriteType = preferWithout ? .withoutResponse : .withResponse
+            let writeType: CBCharacteristicWriteType =
+                (credentialAttempts == 0 && json.count <= maxWith) ? .withResponse : .withoutResponse
 
             onLog?("[link] 写入上限：withoutResponse=\(maxWithout) B / withResponse=\(maxWith) B；请求 \(json.count) B")
-            onLog?("[link] → PhoneRequest type=\(credentialType) 第\(credentialAttempts + 1)次 \(preferWithout ? "withoutResponse（不等车机 ACK）" : "withResponse")：\(String(data: json, encoding: .utf8) ?? "")")
+            onLog?("[link] → PhoneRequest type=\(credentialType) 第\(credentialAttempts + 1)次 \(writeType == .withResponse ? "withResponse（要车机回写确认）" : "withoutResponse（不等 ACK）")：\(String(data: json, encoding: .utf8) ?? "")")
 
             replyPending = true
             peripheral.writeValue(json, for: phoneCharacteristic, type: writeType)
@@ -202,7 +205,9 @@ final class LinkBootstrap: NSObject {
             self.credentialAttempts += 1
             self.credentialType = self.credentialType == Link.typeNetworkBootstrap
                 ? Link.typeSecondRound : Link.typeNetworkBootstrap
-            self.onLog?("[link] ⚠️ 6 秒无凭证回复——换 type=\(self.credentialType) + withResponse 重发")
+            // 这一轮**不加订阅**：要拿到"纯写 + withResponse"的干净结果。
+            // 订阅会挂住 GATT 队列，一旦加进来后面的写就永远发不出去。
+            self.onLog?("[link] ⚠️ 6 秒无凭证回复——换 type=\(self.credentialType) + withoutResponse 重发")
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
                 self?.requestCredentials()
             }
@@ -345,29 +350,28 @@ extension LinkBootstrap: CBPeripheralDelegate {
             case Link.headUnitCharacteristicUUID:
                 headUnitCharacteristic = c
                 onLog?("[link] 对端特征就绪 \(c.uuid)（属性 \(c.properties.rawValue)）")
-                // 订阅放到 didDiscoverDescriptorsFor / 3 秒兜底里做，这里只记录
             default:
                 break
             }
         }
 
-        // 先读一次，拿不到再等通知
-        if let headUnitCharacteristic {
-            peripheral.readValue(for: headUnitCharacteristic)
-            // 部分车机栈必须先 discoverDescriptors 才认 CCCD 写入（iOS 已知怪癖）。
-            // 但描述符发现也可能静默失败——3 秒兜底直接订阅，绝不拿它堵死流程。
-            peripheral.discoverDescriptors(for: headUnitCharacteristic)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                guard let self, self.descriptorDiscovered == false,
-                      let c = self.headUnitCharacteristic, c.properties.contains(.notify) else { return }
-                self.onLog?("[link] 描述符发现无回调——直接订阅 CCCD（不等了）")
-                self.peripheral?.setNotifyValue(true, for: c)
-            }
-        }
-
-        // 不等 CCCD 确认就发请求。官方顺序虽是"先订阅后写"，但车机栈对写入普遍
-        // 不回确认（b57/b65 两次都静默在第一个 GATT 写入上），等它会把整个流程堵死。
+        // ⚠️ 这里**不再 readValue(…102)**：
+        // 车机对该特征读取一律回 CBATTErrorDomain Code=2 "Reading is not permitted"
+        // （它不仅读不了，失败操作还可能冲刷 CoreBluetooth 的 GATT 操作队列），
+        // 完全是在给队列添乱。已知它只能订阅/通知，没必要试。
+        //
+        // ⚠️ 这里**也不订阅**。CoreBluetooth 对同一 peripheral 串行执行 GATT 操作：
+        // `setNotifyValue(true)` 在车机不回 CCCD 确认时会**永远挂住**，把排在它后面的
+        // `writeValue(…101)` 一起堵死——b78 日志实锤：withResponse 写入拿不到任何回调，
+        // 因为请求压根没发出去。之前每一版都在写之前挂了订阅，所以"纯写入"这条路从未试过。
+        //
+        // 顺序：**先纯写**，订阅挪到看门狗第二轮（写入确认失败时才补）。
         requestCredentials()
+
+        // 描述符发现异步跑，只用于日志（不阻塞队列、不触发订阅）
+        if let headUnitCharacteristic {
+            peripheral.discoverDescriptors(for: headUnitCharacteristic)
+        }
     }
 
     /// 连接建立时的 Wi-Fi 状态诊断。
@@ -383,7 +387,7 @@ extension LinkBootstrap: CBPeripheralDelegate {
         }
     }
 
-    /// 描述符发现结果——真正的订阅放这里
+    /// 描述符发现结果——**只记录，不订阅**（订阅会挂住 GATT 队列，见见上面的说明）
     func peripheral(
         _ peripheral: CBPeripheral,
         didDiscoverDescriptorsFor characteristic: CBCharacteristic,
@@ -395,23 +399,16 @@ extension LinkBootstrap: CBPeripheralDelegate {
             onLog?("[link] 描述符发现失败：\(error.localizedDescription)")
         } else {
             let names = characteristic.descriptors?.map { $0.uuid.uuidString } ?? []
-            onLog?("[link] 对端特征描述符：[\(names.joined(separator: ", "))]")
+            onLog?("[link] 对端特征描述符：[\(names.joined(separator: ", "))]（不订阅，避免堵住写入队列）")
         }
-        enableHeadUnitNotifications(on: characteristic, via: peripheral)
     }
 
-    /// 订阅对端特征的通知。
+    /// 订阅对端特征的通知（**只在看门狗第二轮用**：纯写失败后才补订阅）。
     ///
-    /// 用标准的 `setNotifyValue(true)`，**不直接写 CCCD 描述符**：
-    /// b77 实测 `peripheral.writeValue(_:for: CBDescriptor)` 一调就崩（四个会话全部
-    /// 断在"直接写 CCCD = 0x0002"那一行之后），而 b68 的 `setNotifyValue(true)` 不崩。
-    ///
-    /// 代价：iOS 的 `setNotifyValue(true)` 固定写 0x0001（notifications），无法指定
-    /// 0x0002（indications）。想验证车机是否只认 0x0002，用 nRF Connect 手动写
-    /// CCCD——它还能把 iOS 藏起来的 ATT 错误码显示出来。
+    /// 用标准的 `setNotifyValue(true)`，不直接写 CCCD 描述符（b77 实测后者一调就崩）。
     private func enableHeadUnitNotifications(on characteristic: CBCharacteristic, via peripheral: CBPeripheral) {
         if characteristic.properties.contains(.notify) {
-            onLog?("[link] setNotifyValue(true)（订阅通知，CCCD 0x0001）")
+            onLog?("[link] 补订阅 setNotifyValue(true)（CCCD 0x0001）")
             peripheral.setNotifyValue(true, for: characteristic)
         } else {
             onLog?("[link] 对端特征无 notify 属性（属性 \(characteristic.properties.rawValue)），无法订阅")
