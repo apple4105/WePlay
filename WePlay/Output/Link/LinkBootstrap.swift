@@ -92,6 +92,7 @@ final class LinkBootstrap: NSObject {
         rediscoveryCount = 0
         cccdEnabled = false
         didResendAfterCccd = false
+        didSubscribeCCCD = false
     }
 
     /// 用户在 UI 里输入了配对码后调用。
@@ -114,6 +115,9 @@ final class LinkBootstrap: NSObject {
 
     /// CCCD 是否已确认启用（启用后要按官方顺序补发请求）
     private var cccdEnabled = false
+
+    /// 是否已经发起过 CCCD 订阅（写确认之后才订阅，防重复）
+    private var didSubscribeCCCD = false
 
     /// 是否已经因"CCCD 启用"补发过请求（避免重复发）
     private var didResendAfterCccd = false
@@ -229,6 +233,7 @@ final class LinkBootstrap: NSObject {
         descriptorDiscovered = false
         cccdEnabled = false
         didResendAfterCccd = false
+        didSubscribeCCCD = false
         phoneCharacteristic = nil
         headUnitCharacteristic = nil
         peripheral.discoverServices([Link.serviceUUID])
