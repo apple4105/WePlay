@@ -132,8 +132,11 @@ final class LinkBootstrap: NSObject {
     /// CCCD 是否已确认启用（启用后要按官方顺序补发请求）
     private var cccdEnabled = false
 
-    /// 是否已经发起过 PhoneRequest 写入（2 秒兜底用，避免重复写）
+    /// 是否已经发起过 PhoneRequest 写入
     private var credentialWriteStarted = false
+
+    /// 写回调里拿到的 peripheral（委托方法参数，供订阅用）
+    private var peripheral_: CBPeripheral?
 
     /// 是否已经因"CCCD 启用"补发过请求（避免重复发）
     private var didResendAfterCccd = false
@@ -393,27 +396,10 @@ extension LinkBootstrap: CBPeripheralDelegate {
         // ⚠️ 这里**不再 readValue(…102)**：车机对该特征读取一律回
         // CBATTErrorDomain Code=2 "Reading is not permitted"，失败操作还会冲刷队列。
         //
-        // ⚠️ **必须先订阅 CCCD = 0x0002（指示），再写 PhoneRequest**。
-        // 依据（开源实现 xhcoding1998/Carlink 的 `OpenCarLinkPC从0到1开发手册.md` +
-        // `raw_ble.py`/`wireless.py` 源码）：
-        //   · 车机收到 Client Info 后**立刻**用 ATT `0x1D` Handle Value Indication
-        //     推送 Server Info（凭证），**不等订阅、也不重发**；
-        //   · iOS 在 CCCD 未设成 0x0002 时会**直接丢弃指示**；
-        //   · 该手册明确写"实机成功行为使用 0x1D Indication"，并说车机的
-        //     characteristic property 声明与实际不符（声明 notify、实际用 indication）。
-        // 所以顺序写反 = 车机推凭证时我们没订阅 = 凭证永久丢失 = 车机永远"正在连接"。
-        //
-        // 先发现描述符，拿到 CCCD 后直接写 0x0002；2 秒兜底直接写，避免卡死。
+        // **先写 Client Info，订阅留到最后**（见 didWriteValueFor 的说明）。
+        requestCredentials()
         if let headUnitCharacteristic {
             peripheral.discoverDescriptors(for: headUnitCharacteristic)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-                guard let self, !self.credentialWriteStarted else { return }
-                self.onLog?("[link] ⚠️ 描述符/CCCD 2 秒无回调——直接写 PhoneRequest（已订阅的凭证可能丢失，此轮仅作诊断）")
-                self.requestCredentials()
-            }
-        } else {
-            onLog?("[link] ⚠️ 没找到对端特征——无法订阅，直接写 PhoneRequest")
-            requestCredentials()
         }
     }
 
@@ -430,7 +416,7 @@ extension LinkBootstrap: CBPeripheralDelegate {
         }
     }
 
-    /// 描述符发现结果——**在这里订阅 CCCD = 0x0002（指示）**，然后才写 PhoneRequest。
+    /// 描述符发现结果——只记日志。订阅放到写入之后（见 didWriteValueFor）。
     func peripheral(
         _ peripheral: CBPeripheral,
         didDiscoverDescriptorsFor characteristic: CBCharacteristic,
@@ -451,15 +437,7 @@ extension LinkBootstrap: CBPeripheralDelegate {
         // 后仍然崩——所以根因就是描述符写本身（在 didDiscoverDescriptorsFor 回调里
         // 直接写 CBDescriptor 会崩）。
         //
-        // 改用标准 `setNotifyValue(true)`：nRF Connect 实测本车机 **CCCD 写会成功**
-        // （读回 `01 00`），所以标准 API 能走通。
-        //
-        // **必须挪出委托回调**：b89 在 didDiscoverDescriptorsFor 里直接调，
-        // `CCCD 已启用` 一直是 false（静默失败）。nRF 是在用户点按（回调之外）时写的
-        // 才成功——CoreBluetooth 不接受在一个回调内部重入发起新的 GATT 操作。
-        DispatchQueue.main.async {
-            self.enableHeadUnitNotifications(on: characteristic, via: peripheral)
-        }
+        // 只记录。订阅放到写入之后（见 didWriteValueFor）。
     }
 
     /// 订阅对端特征的通知（标准 API）。
@@ -543,12 +521,21 @@ extension LinkBootstrap: CBPeripheralDelegate {
         error: Error?
     ) {
         guard characteristic.uuid == Link.phoneCharacteristicUUID else { return }
+        peripheral_ = peripheral
         if let error {
             onLog?("[link] 写特征失败：\(error.localizedDescription)")
             onFailure?(error)
             return
         }
         onLog?("[link] 写特征成功（车机 GATT 回了写确认）")
-        // 订阅已经在写之前做完了（必须先 0x0002 再写），这里不再补订阅。
+        // **写成功之后才订阅**（顺序刻意放最后）：
+        // 车机的 GATT server 对描述符写**从不回 ATT Write Response**（CarBridge 注释 +
+        // b89 日志双证：setNotifyValue 一调，后面的写就再也拿不到确认）。
+        // 所以订阅放在最后——它可能挂死，但此时已经没有任何 GATT 操作需要它让路；
+        // 若车机在订阅成立时推送 Server Info，我们仍能收到。
+        if !cccdEnabled, let c = headUnitCharacteristic, let p = peripheral_ {
+            cccdEnabled = true
+            enableHeadUnitNotifications(on: c, via: p)
+        }
     }
 }
