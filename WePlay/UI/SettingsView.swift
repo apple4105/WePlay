@@ -51,6 +51,17 @@ struct SettingsView: View {
     }
 }
 
+/// 待分享的内容。
+///
+/// 用 `.sheet(item:)` 而不是 `.sheet(isPresented:)`：后者要同时维护
+/// `showShare` 和 `shareItems` 两个 @State，SwiftUI 可能在 `shareItems` 生效前
+/// 就构建了分享页，于是第一次点「导出」只弹出一个空壳图标、没有内容，
+/// 第二次才正常（真机反馈）。`item:` 把内容和呈现合成一次原子更新。
+struct SharePayload: Identifiable {
+    let id = UUID()
+    let items: [Any]
+}
+
 /// 可靠的分享弹窗。
 ///
 /// 以前直接把 UIActivityViewController 在 sheet 里 present，真机上弹不出来
@@ -71,8 +82,7 @@ struct DiagnosticsView: View {
     @Environment(\.dismiss) var dismiss
     @State private var logText = ""
     @State private var copied = false
-    @State private var showShare = false
-    @State private var shareItems: [Any] = []
+    @State private var sharePayload: SharePayload?
     @State private var exportFailed = false
 
     var body: some View {
@@ -122,8 +132,8 @@ struct DiagnosticsView: View {
             }
             // 拉满全高：默认半高 sheet 一屏只露几十行，往上拖很别扭
             .presentationDetents([.large])
-            .sheet(isPresented: $showShare) {
-                ShareSheet(items: shareItems)
+            .sheet(item: $sharePayload) { payload in
+                ShareSheet(items: payload.items)
             }
             .onAppear {
                 logText = Diagnostics.shared.exportText()
@@ -145,7 +155,7 @@ struct DiagnosticsView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { exportFailed = false }
             return
         }
-        shareItems = [url]
-        showShare = true
+        // 内容与呈现合成一次原子更新，避免第一次弹出空壳
+        sharePayload = SharePayload(items: [url])
     }
 }

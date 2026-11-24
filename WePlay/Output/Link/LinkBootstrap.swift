@@ -138,7 +138,10 @@ final class LinkBootstrap: NSObject {
         let request = Link.PhoneRequest(
             id: UUID().uuidString,
             name: HostIdentity.deviceName,
-            model: UIDevice.current.model,
+            // 车机屏幕显示的是 **model** 字段，不是 name（b80 实锤：车机显示
+            // "正在连接 iPhone"，而我们发的是 model=UIDevice.current.model="iPhone"）。
+            // 改成 WePlay，车机就会显示"正在连接 WePlay"。
+            model: HostIdentity.deviceName,
             band: 0,
             mac: selfMAC,
             type: credentialType
@@ -494,11 +497,19 @@ extension LinkBootstrap: CBPeripheralDelegate {
         didWriteValueFor characteristic: CBCharacteristic,
         error: Error?
     ) {
+        guard characteristic.uuid == Link.phoneCharacteristicUUID else { return }
         if let error {
             onLog?("[link] 写特征失败：\(error.localizedDescription)")
             onFailure?(error)
-        } else {
-            onLog?("[link] 写特征成功（车机 GATT 回了写确认）——等凭证回复")
+            return
+        }
+        onLog?("[link] 写特征成功（车机 GATT 回了写确认）")
+        // **写确认之后才订阅**：此刻 GATT 队列空闲，setNotifyValue 不会被前面的
+        // 挂死操作堵住。车机既然回了写确认，说明它的栈是活的，CCCD 这次大概率能成。
+        // 不订阅的话车机完全没有通道回 HeadUnitReply（…102 读又被 ReadNotPermitted 拒绝）。
+        if !didSubscribeCCCD, let headUnitCharacteristic {
+            didSubscribeCCCD = true
+            enableHeadUnitNotifications(on: headUnitCharacteristic, via: peripheral)
         }
     }
 }
