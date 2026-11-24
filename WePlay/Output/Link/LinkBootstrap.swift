@@ -118,8 +118,11 @@ final class LinkBootstrap: NSObject {
 
     // MARK: - 内部
 
-    /// 上一次用户手工输入的配对码（BLE 阶段不用，留给 Carlink 认证阶段）
+    /// 用户输入的 6 位配对码（写入 Client Info 的 pinCodeOrAuthentication）
     private var lastPinCode: String?
+
+    /// 是否已经拿到配对码（UI 据此决定要不要提前弹框）
+    var hasPin: Bool { !(lastPinCode ?? "").isEmpty }
 
     /// 描述符是否发现成功（3 秒兜底订阅用）
     private var descriptorDiscovered = false

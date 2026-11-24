@@ -395,7 +395,16 @@ final class LinkController {
         bleBootstrap.accessoryMAC = mac
         let digest = SHA256.hash(data: identity?.leafCertificate ?? Data())
         bleBootstrap.clientID = digest.prefix(3).map { String(format: "%02x", $0) }.joined()
+        // 重连时沿用本次会话已输入的配对码（车机码约 120 秒刷新，会话内复用）
+        if let pin = savedPin { bleBootstrap.submitPinCode(pin) }
         bleBootstrap.onLog = { diag.log("BLE", $0) }
+        // **一按启动就请用户输入配对码**：车机点 ICCOA 时就已经在屏幕上显示了 6 位码
+        // （用户实机确认：与手机是否启动无关），所以不必等 BLE 连上才弹。
+        // 而且这个码约每 120 秒刷新，早输更稳。
+        if !(bleBootstrap.hasPin) {
+            diag.log("BLE", "请查看车机屏幕上的 6 位配对码并输入")
+            PipelineState.shared.pinRequired = true
+        }
         bleBootstrap.onFailure = { diag.error("BLE", String(describing: $0)) }
         bleBootstrap.onCredentials = { [weak self] reply in
             guard let self else { return }
@@ -500,6 +509,9 @@ final class LinkController {
 
     /// Carlink 会话（认证 + 服务端口编排）。RTSP 由车机拨入后交给 DisplaySource。
     private var carlinkSession: CarlinkSession?
+
+    /// 本次会话输入的 6 位配对码（重连时复用）
+    private var savedPin: String?
 
     /// 后台自动发现拿到凭证后置位——App 打开时自动续连（用户点通知即可）
     var autoConnectPending = false
@@ -625,6 +637,7 @@ final class LinkController {
         // Carlink 认证阶段也要用，两条路都喂一遍。
         bleBootstrap?.submitPinCode(code)
         carlinkSession?.submitPin(code)
+        savedPin = code
         PipelineState.shared.pinRequired = false
     }
 
@@ -759,6 +772,7 @@ final class LinkController {
         // 链路层状态一并复位，否则下次点「启动」不会重新发 SYN/identification
         linkConnected = false
         identificationSent = false
+        savedPin = nil
         txSequence = 0
         rxSequence = 0
         PipelineState.shared.pinRequired = false
