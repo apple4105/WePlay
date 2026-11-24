@@ -139,22 +139,19 @@ final class LinkController {
             } else {
                 diag.log("管线", "虚拟 accessory 就绪（管线已推进，保持当前状态）")
             }
-            diag.log("管线", "发送 presence + SYN + identification")
-            // CarWithin SameDeviceProbe：**先发 presence 包**，0.1 秒后再发 SYN，再报身份。
+            diag.log("管线", "发送 presence，随后 SYN（等 iOS 的 SYN-ACK）")
+            // CarWithin SameDeviceProbe：**先发 presence 包**，0.1 秒后再发 SYN。
             // 少了 presence，iOS 的 iAP2 栈可能直接不认这条链路。
             self.sendRaw(LinkPacket.presence)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                guard let self else { return }
-                // 控制会话先同步（SYN），payload 照 CarWithin（iAP2 链路选项）
-                let synPayload = Data([1, 5, 8, 0, 7, 0xd0, 0, 0xfa, 3, 3, 1, 0, 1])
-                self.sendRaw(LinkPacket(control: LinkPacket.controlSYN, sequence: 0,
-                                        sessionID: LinkPacket.controlSessionID,
-                                        payload: synPayload).encode())
-                let name = (Bundle.main.infoDictionary?["CFBundleDisplayName"] as? String) ?? "CP-Receiver-1"
-                let mac = self.transport.accessoryMAC
-                let ident = AccessoryMessages.identification(name: name, mac: mac)
-                diag.log("iAP2", "→ identification (0x1D01)，\(ident.parameters.count) 参数，MAC=\(mac)")
-                self.send(message: ident)
+                self?.sendSYN()
+            }
+            // 兜底：2.5 秒内没等到 SYN-ACK（链路没进 Connected），仍发一次
+            // identification——纯粹为了让日志能记录"我们尝试过"，不作为正常路径。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                guard let self, !self.identificationSent else { return }
+                diag.warn("iAP2", "2.5 秒未收到 SYN-ACK（链路未进入 Connected）——仍尝试 identification 供诊断")
+                self.sendIdentification()
             }
         }
 
@@ -163,7 +160,9 @@ final class LinkController {
         linkParser.onPacket = { [weak self] packet in
             guard let self else { return }
             Diagnostics.shared.hex("iAP2", "包", packet.encode())
+            diag.log("iAP2", "← 包 control=0x\(String(packet.control, radix: 16)) seq=\(packet.sequence) ack=\(packet.acknowledgement) payload=\(packet.payload.count)B")
             self.rxSequence = packet.sequence
+            self.handleLinkPacket(packet)
         }
         linkParser.onMessage = { [weak self] message in
             diag.log("iAP2", "← 消息 id=0x\(String(message.id, radix: 16)) 参数 \(message.parameters.count) 条")
@@ -186,6 +185,106 @@ final class LinkController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.transport.start()
         }
+    }
+
+    // MARK: - iAP2 链路层（SYN / SYN-ACK / ACK）
+
+    /// 是否已发出 identification（防重复）
+    private var identificationSent = false
+    /// 链路是否已协商完成（收到 SYN-ACK 并回 ACK 之后）
+    private var linkConnected = false
+
+    /// 发送 SYN。
+    ///
+    /// **payload 必须是合法 SYN**（verx 规范 `iap2_link_establish/spec/03-syn-negotiation.md`）：
+    /// - version=1 时载荷长度 = `10 + 3n`，**没有显式 n 字段**，条目数由长度推出
+    /// - `n >= 1`（接收校验路径明确要求"至少一条特性条目"）
+    /// - 每条 3 字节 `{id, type, second}`：`id != 0`、`type <= 4`、至少一条 `type == 0`
+    ///
+    /// 旧 payload 抄自 CarWithin 的 `[1,5,8,0,7,0xd0,0,0xfa,3,3,1,0,1]`：在 version=1 下
+    /// 它把偏移 10 的字节当成第一条目的 id=0，**违反 `id != 0` 且不足 3 字节**——非法帧，
+    /// iOS 直接丢弃，于是后面的 identification 无人应答（b77 实锤：presence 有回声、
+    /// identification 零响应）。
+    private func sendSYN() {
+        // 固定头 10 字节：version, MOP, maxPacket(BE16), ackTimeout(BE16), cumAck(BE16), MR, MCA
+        // 尾部 n 条特性条目，各 3 字节
+        let synPayload = Data([
+            1,            // version = 1
+            8,            // MaxOutstandingPackets = 8（1..127）
+            0xFF, 0xFF,   // maxPacketSize = 65535（> 23）
+            0x03, 0xE8,   // ACK timeout = 1000 ms（> 19）
+            0x00, 0x0A,   // CumAckTimeout = 10（10..32767）
+            30,           // MaxRetransmissions = 30（1..30，缺省值）
+            0,            // MaxCumAck = 0（0..MOP，缺省值）
+            1, 0, 0,      // 条目 0：id=1, type=0（满足"至少一条 type==0"）, second=0
+        ])
+        Diagnostics.shared.log("iAP2", "→ SYN (\(synPayload.count) B，n=\((synPayload.count - 10) / 3))")
+        let packet = LinkPacket(control: LinkPacket.controlSYN,
+                                sequence: 0,
+                                acknowledgement: 0,
+                                sessionID: LinkPacket.controlSessionID,
+                                payload: synPayload)
+        sendRaw(packet.encode())
+    }
+
+    /// 处理链路层控制包：SYN-ACK / SYN / ACK。
+    ///
+    /// 状态机（`spec/05-state-machine.md`）：链路必须走到 **Connected** 才能发控制消息。
+    /// 路径 `Idle → Pending（SYN/ACK 交换）→ Connected`。之前从不处理这些包，
+    /// 链路永远停在 Pending，identification 自然没人理。
+    private func handleLinkPacket(_ packet: LinkPacket) {
+        let diag = Diagnostics.shared
+        let isSYN = packet.control & LinkPacket.controlSYN != 0
+        let isACK = packet.control & LinkPacket.controlACK != 0
+
+        if isSYN && isACK {
+            // 对端 SYN-ACK：回 ACK，链路进入 Connected，**然后**才发 identification
+            diag.log("iAP2", "← SYN-ACK（seq=\(packet.sequence)）→ 回 ACK，链路 Connected")
+            let ack = LinkPacket(control: LinkPacket.controlACK,
+                                 sequence: 0,
+                                 acknowledgement: packet.sequence,
+                                 sessionID: LinkPacket.controlSessionID,
+                                 payload: Data())
+            sendRaw(ack.encode())
+            markLinkConnected()
+            return
+        }
+        if isSYN {
+            // 对端先发 SYN：回 SYN-ACK（ACK 位 + 自己的 SYN payload）
+            diag.log("iAP2", "← 对端 SYN（seq=\(packet.sequence)）→ 回 SYN-ACK")
+            let synPayload = Data([1, 8, 0xFF, 0xFF, 0x03, 0xE8, 0x00, 0x0A, 30, 0, 1, 0, 0])
+            let synack = LinkPacket(control: LinkPacket.controlSYN | LinkPacket.controlACK,
+                                    sequence: 0,
+                                    acknowledgement: packet.sequence,
+                                    sessionID: LinkPacket.controlSessionID,
+                                    payload: synPayload)
+            sendRaw(synack.encode())
+            markLinkConnected()
+            return
+        }
+        if isACK {
+            // 纯 ACK（无载荷）才单独记；带载荷的 0x40 是数据包，不能混淆
+            if packet.payload.isEmpty {
+                diag.log("iAP2", "← ACK（ack=\(packet.acknowledgement)）")
+            }
+        }
+    }
+
+    /// 链路协商完成 → 发 identification（只发一次）
+    private func markLinkConnected() {
+        guard !linkConnected else { return }
+        linkConnected = true
+        sendIdentification()
+    }
+
+    private func sendIdentification() {
+        guard !identificationSent, let transport else { return }
+        identificationSent = true
+        let name = (Bundle.main.infoDictionary?["CFBundleDisplayName"] as? String) ?? "CP-Receiver-1"
+        let mac = transport.accessoryMAC
+        let ident = AccessoryMessages.identification(name: name, mac: mac)
+        Diagnostics.shared.log("iAP2", "→ identification (0x1D01)，\(ident.parameters.count) 参数，MAC=\(mac)")
+        send(message: ident)
     }
 
     // MARK: - iAP2 消息收发
@@ -645,6 +744,11 @@ final class LinkController {
         // OpenXPlay 等其他 CarPlay 会话会被顶掉（0.0.1-b51 实测教训）
         transport?.stop()
         transport = nil
+        // 链路层状态一并复位，否则下次点「启动」不会重新发 SYN/identification
+        linkConnected = false
+        identificationSent = false
+        txSequence = 0
+        rxSequence = 0
         PipelineState.shared.pinRequired = false
         phase = .idle
         Diagnostics.shared.log("管线", "已停止（保留车机凭证缓存）")
