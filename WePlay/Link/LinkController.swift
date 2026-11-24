@@ -398,13 +398,6 @@ final class LinkController {
         // 重连时沿用本次会话已输入的配对码（车机码约 120 秒刷新，会话内复用）
         if let pin = savedPin { bleBootstrap.submitPinCode(pin) }
         bleBootstrap.onLog = { diag.log("BLE", $0) }
-        // **一按启动就请用户输入配对码**：车机点 ICCOA 时就已经在屏幕上显示了 6 位码
-        // （用户实机确认：与手机是否启动无关），所以不必等 BLE 连上才弹。
-        // 而且这个码约每 120 秒刷新，早输更稳。
-        if !(bleBootstrap.hasPin) {
-            diag.log("BLE", "请查看车机屏幕上的 6 位配对码并输入")
-            PipelineState.shared.pinRequired = true
-        }
         bleBootstrap.onFailure = { diag.error("BLE", String(describing: $0)) }
         bleBootstrap.onCredentials = { [weak self] reply in
             guard let self else { return }

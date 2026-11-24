@@ -222,7 +222,14 @@ final class LinkBootstrap: NSObject {
             guard let self, self.replyPending else { return }
             // 链路状态 + CCCD 状态一起打：区分"链路死了"和"车机不理"
             let linkState = self.peripheral?.state == .connected ? "已连接" : "非连接(\(self.peripheral?.state.rawValue ?? -1))"
-            self.onLog?("[link] 链路状态：\(linkState)；CCCD 已启用：\(self.cccdEnabled)；已补发：\(self.didResendAfterCccd)")
+            self.onLog?("[link] 链路状态：\(linkState)；CCCD 已启用：\(self.cccdEnabled)")
+            // **首次配对：不带码写了一次、车机没回 → 这时才请用户输入配对码。**
+            // 已配对过的车机会在第一次（不带码）就直接回凭证，永远走不到这里，
+            // 所以"以后不用再输码"是自然结果，不需要额外记状态。
+            if !self.hasPin {
+                self.onLog?("[link] 车机未回应不带码的请求——首次配对需要车机屏幕上的 6 位配对码")
+                self.onPinCodeRequired?("")
+            }
             guard self.credentialAttempts < 1 else {
                 // 第二轮也空：OpenXPlay 的对策是重新发现服务（车机 GATT 数据库
                 // 可能在连接后被重新发布，旧的 characteristic 句柄已失效）
@@ -485,13 +492,8 @@ extension LinkBootstrap: CBPeripheralDelegate {
         } else {
             onLog?("[link] ✅ CCCD 订阅已确认（isNotifying=\(characteristic.isNotifying)）")
             cccdEnabled = characteristic.isNotifying
-            // **先把车机屏幕上的 6 位配对码要过来**：Client Info 的
-            // pinCodeOrAuthentication 首次配对必带（ft-app 注释「six-digit PIN」）。
-            // 同时先写一次不带码的（已配对车机会走 quick 路径直接回凭证）。
-            if lastPinCode == nil {
-                onLog?("[link] 首次配对：需要车机屏幕上的 6 位配对码（已请 UI 弹出输入）")
-                onPinCodeRequired?("")
-            }
+            // 先写一次 Client Info。**不带码时就能回凭证 = 已配对过**（quick 路径），
+            // 那就永远不用输码；只有车机不回、看门狗超时之后才弹配对码框。
             requestCredentials()
         }
     }
