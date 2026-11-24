@@ -111,8 +111,10 @@ final class LinkBootstrap: NSObject {
         lastPinCode = code
         onLog?("[link] 用户输入配对码：\(code)（长度 \(code.count)）——带进 Client Info 重发")
         guard isConnected, credentialWriteStarted else { return }
-        // 重新握手：重置重试计数，带上配对码再写一次
+        // 重置重试计数与重发现次数，给带码的写入一个完整的新阶梯
         credentialAttempts = 0
+        rediscoveryCount = 0
+        credentialType = Link.typeNetworkBootstrap
         requestCredentials()
     }
 
@@ -243,11 +245,10 @@ final class LinkBootstrap: NSObject {
                 return
             }
             self.credentialAttempts += 1
-            self.credentialType = self.credentialType == Link.typeNetworkBootstrap
-                ? Link.typeSecondRound : Link.typeNetworkBootstrap
-            // 这一轮**不加订阅**：要拿到"纯写 + withResponse"的干净结果。
-            // 订阅会挂住 GATT 队列，一旦加进来后面的写就永远发不出去。
-            self.onLog?("[link] ⚠️ 6 秒无凭证回复——换 type=\(self.credentialType) + withoutResponse 重发")
+            // **type 固定 1001**（Wi-Fi Direct / P2P GO）：长城车机自己生成 DIRECT- 热点、
+            // 手机加入，用户已确认这个拓扑。1002 是 SoftAP 型车机用的，这里不要。
+            // 这一轮的价值在于"如果用户已经输入了配对码，就用带码的 Client Info 重发"。
+            self.onLog?("[link] ⚠️ 6 秒无凭证回复——带码状态=\(self.hasPin) 重发 type=\(self.credentialType)")
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
                 self?.requestCredentials()
             }
