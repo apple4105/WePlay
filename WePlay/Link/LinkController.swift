@@ -263,9 +263,17 @@ final class LinkController {
             return
         }
         if isACK {
-            // 纯 ACK（无载荷）才单独记；带载荷的 0x40 是数据包，不能混淆
             if packet.payload.isEmpty {
                 diag.log("iAP2", "← ACK（ack=\(packet.acknowledgement)）")
+            } else {
+                // **收到数据包必须立刻回 ACK**，否则对端每秒重传（b91 实测：iOS 连发 17 次）。
+                let ack = LinkPacket(control: LinkPacket.controlACK,
+                                     sequence: txSequence &+= 1,
+                                     acknowledgement: packet.sequence,
+                                     sessionID: LinkPacket.controlSessionID,
+                                     payload: Data())
+                sendRaw(ack.encode())
+                diag.log("iAP2", "← 数据包 seq=\(packet.sequence)（\(packet.payload.count) B）→ 已回 ACK")
             }
         }
     }
@@ -313,6 +321,31 @@ final class LinkController {
         }
 
         switch message.id {
+        // ── iAP2 标准认证消息族（0xAA00..0xAA05）──────────────
+        case 0xAA00:
+            // AuthenticationInformation：对端告知支持的认证方式 → 回我们的证书
+            diag.log("认证", "← AuthenticationInformation (0xAA00) → 发送配件证书")
+            if let cert = identity?.leafCertificate, !cert.isEmpty {
+                send(message: AccessoryMessages.authenticationCertificate(chain: cert))
+            } else {
+                diag.warn("认证", "0xAA00 但身份未装载")
+            }
+        case 0xAA02:
+            diag.log("认证", "← AuthenticationChallenge (0xAA02)")
+            if let challenge = message.parameter(0x000D)?.value
+                ?? message.parameters.first?.value, let authenticator {
+                do {
+                    let resp = try authenticator.respond(toChallenge: challenge)
+                    diag.log("认证", "challenge 已签名（\(resp.signature.count) B）→ 0xAA03")
+                    send(message: LinkMessage(id: 0xAA03, parameters: [
+                        LinkParameter(id: 0x000E, value: resp.signature)
+                    ]))
+                } catch { diag.error("认证", "签名失败：\(error)") }
+            } else {
+                diag.warn("认证", "0xAA02 缺少挑战数据或身份未装载")
+            }
+        case 0xAA04:
+            diag.log("认证", "← AuthenticationStatus (0xAA04)：\(message.parameters.first?.uintValue() ?? 0)")
         case 0x0022:   // AuthenticationChallenge
             guard let challenge = message.parameter(0x000D)?.value, let authenticator else {
                 diag.warn("认证", "challenge 消息但缺少 0x000D 参数或身份未装载")
@@ -473,13 +506,10 @@ final class LinkController {
         let diag = Diagnostics.shared
         wifiJoiner = WiFiJoiner()
         wifiJoiner.onLog = { diag.log("WiFi", $0) }
-        wifiJoiner.onFailure = { [weak self] error in
+        // 只在"用户拒绝系统弹窗"这类可重试的情况下重试；权限缺失类错误走手动，不重试
+        wifiJoiner.onFailure = { error in
             diag.error("WiFi", String(describing: error))
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                guard let self, self.phase != .idle else { return }
-                diag.log("WiFi", "3 秒后重试加入 \(reply.ssid)")
-                self.wifiJoiner?.join(ssid: reply.ssid, psk: reply.psk)
-            }
+            diag.log("WiFi", "自动加入失败，请按主页卡片手动加入网络后按「连接车机」")
         }
         wifiJoiner.onJoined = { [weak self] ssid in
             guard let self else { return }

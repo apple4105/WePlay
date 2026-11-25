@@ -59,10 +59,15 @@ final class WiFiJoiner {
                 self.onLog?("[WiFi] NEHotspotConfiguration 失败：\(error.localizedDescription)")
                 // 常见原因：没有 HotspotConfiguration entitlement（免费账号）、
                 // 或用户拒绝了系统对话框。前者 fallback 到手动，后者直接报错。
+                // **任何错误都转手动加入**，不要只认 invalid(0)。
+                // 实测（b91，长城拿铁）：没有 HotspotConfiguration entitlement 时返回的是
+                // Code=8 "internal error."，原来的判断只认 0，于是掉进 3 秒一次的重试死循环，
+                // 手动加入的凭证卡片永远弹不出来。
                 let nsError = error as NSError
-                if nsError.domain == NEHotspotConfigurationErrorDomain,
-                   nsError.code == NEHotspotConfigurationError.invalid.rawValue {
-                    self.onLog?("[WiFi] 可能是没有 entitlement，转手动加入")
+                let manual = (nsError.domain == NEHotspotConfigurationErrorDomain)
+                    && nsError.code != NEHotspotConfigurationError.userDenied.rawValue
+                if manual {
+                    self.onLog?("[WiFi] 自动加入不可用（code=\(nsError.code)）→ 转手动加入")
                     self.onManualJoinRequired?(ssid, psk)
                     return
                 }
