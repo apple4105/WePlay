@@ -142,6 +142,20 @@ final class Diagnostics {
 
     // MARK: - 导出
 
+    /// 清空内存和持久化诊断日志。
+    ///
+    /// 保留一条新的会话标记，方便确认清空已经生效。
+    func clear() {
+        lock.lock()
+        buffer.removeAll(keepingCapacity: true)
+        try? logFile?.close()
+        logFile = nil
+        try? Data().write(to: Self.logFileURL, options: .atomic)
+        openLogFile()
+        lock.unlock()
+        log("诊断", "日志已清空，开始新会话")
+    }
+
     /// 当前缓冲的日志条数（UI 显示"共 N 条"用）
     var lineCount: Int {
         lock.lock()

@@ -84,6 +84,7 @@ struct DiagnosticsView: View {
     @State private var copied = false
     @State private var sharePayload: SharePayload?
     @State private var exportFailed = false
+    @State private var showClearConfirmation = false
 
     var body: some View {
         NavigationStack {
@@ -100,7 +101,8 @@ struct DiagnosticsView: View {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("导出") { exportFile() }
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    Button("清空", role: .destructive) { showClearConfirmation = true }
                     Button("复制") {
                         UIPasteboard.general.string = Diagnostics.shared.exportText()
                         copied = true
@@ -134,6 +136,16 @@ struct DiagnosticsView: View {
             .presentationDetents([.large])
             .sheet(item: $sharePayload) { payload in
                 ShareSheet(items: payload.items)
+            }
+            .confirmationDialog("清空全部诊断日志？", isPresented: $showClearConfirmation,
+                                titleVisibility: .visible) {
+                Button("清空日志", role: .destructive) {
+                    Diagnostics.shared.clear()
+                    logText = Diagnostics.shared.exportText()
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("此操作会删除此前保存的日志，无法撤销。")
             }
             .onAppear {
                 logText = Diagnostics.shared.exportText()
