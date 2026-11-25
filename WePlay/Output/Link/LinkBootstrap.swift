@@ -48,8 +48,10 @@ final class LinkBootstrap: NSObject {
 
     private var selfMAC: String { accessoryMAC }
 
-    /// 诊断期：每个周围设备只记一次，避免 AllowDuplicates 刷屏
+    /// 已见过的周围设备（只用于计数，不再逐条打日志）
     private var loggedPeripherals = Set<UUID>()
+    /// 本轮扫描见过的设备数
+    private(set) var scannedDeviceCount = 0
 
     override init() {
         super.init()
@@ -308,13 +310,13 @@ extension LinkBootstrap: CBCentralManagerDelegate {
             return
         }
 
-        // 其余设备每个只记一次，避免刷屏；带厂商数据的记厂商数据 hex
+        // **其余设备不再逐条打印**：附近几十个智能灯/网关会把日志冲满，
+        // 把真正重要的行（凭证、认证、RTSP）挤出缓冲。只累计计数，等超时/找不到车机时
+        // 由 LinkController 打一行汇总。崩溃现场已改用系统 .ips，不需要长日志。
         if loggedPeripherals.insert(peripheral.identifier).inserted {
-            let svc = serviceUUIDs.map { $0.uuidString }.joined(separator: ",")
-            if let mfr = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data,
-               !mfr.isEmpty {
-                onLog?("[link] 周围设备：\(name) RSSI \(RSSI) 服务[\(svc)] 厂商 \(mfr.prefix(12).map { String(format: "%02x", $0) }.joined())")
-            } else {
+            scannedDeviceCount += 1
+        }
+    } else {
                 onLog?("[link] 周围设备：\(name) RSSI \(RSSI) 服务[\(svc)]")
             }
         }

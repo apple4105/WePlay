@@ -191,8 +191,19 @@ final class LinkController {
         linkParser = LinkParser()
         linkParser.onPacket = { [weak self] packet in
             guard let self else { return }
-            Diagnostics.shared.hex("iAP2", "包", packet.encode())
-            diag.log("iAP2", "← 包 control=0x\(String(packet.control, radix: 16)) seq=\(packet.sequence) ack=\(packet.acknowledgement) payload=\(packet.payload.count)B")
+            // **相同包去重**：iOS 在对端没 ACK 时会原样重传（b91 里同一个 16B 包发了 17 次），
+            // 逐条打印会瞬间冲满 500 条缓冲。相同包只计数，内容变化时才打。
+            let sig = packet.encode()
+            if sig == self.lastInboundSignature {
+                self.repeatedInbound += 1
+            } else {
+                if self.repeatedInbound > 0 {
+                    diag.log("iAP2", "（上一包重复 \(self.repeatedInbound) 次）")
+                    self.repeatedInbound = 0
+                }
+                self.lastInboundSignature = sig
+                diag.log("iAP2", "← 包 control=0x\(String(packet.control, radix: 16)) seq=\(packet.sequence) ack=\(packet.acknowledgement) payload=\(packet.payload.count)B")
+            }
             self.rxSequence = packet.sequence
             self.handleLinkPacket(packet)
         }
@@ -203,7 +214,8 @@ final class LinkController {
         linkParser.onError = { diag.warn("iAP2", String(describing: $0)) }
 
         transport.onData = { [weak self] data in
-            Diagnostics.shared.hex("传输", "← iPhone", data)
+            // 原始 hex 只在数据较短（控制/认证类）时记；视频心跳那种长包不记
+            if data.count <= 64 { Diagnostics.shared.hex("传输", "← iPhone", data) }
             self?.linkParser.append(data)
         }
         transport.onFailure = { [weak self] msg in
@@ -514,7 +526,8 @@ final class LinkController {
 
         let timeout = DispatchWorkItem { [weak self] in
             guard let self, self.cachedReply == nil, self.phase == .bleScanning else { return }
-            diag.warn("BLE", "12 秒未发现车机广播——车机可能不在附近（熄火/未开投屏），或广播不带 ICCOA 服务（看诊断里『周围设备』清单）")
+            let seen = self.bleBootstrap?.scannedDeviceCount ?? 0
+            diag.warn("BLE", "12 秒未发现车机广播（本轮见到 \(seen) 个 BLE 设备，均不带 ICCOA 服务/名称）——车机可能不在附近（熄火/未开投屏）")
             diag.log("管线", "停止扫描。车机就绪后再按「连接车机」")
             self.bleBootstrap?.stop()
             self.bleBootstrap = nil
@@ -565,6 +578,10 @@ final class LinkController {
 
     /// Carlink 会话（认证 + 服务端口编排）。RTSP 由车机拨入后交给 DisplaySource。
     private var carlinkSession: CarlinkSession?
+
+    /// 上一包签名与其连续重复次数（用于压掉重传刷屏）
+    private var lastInboundSignature: Data?
+    private var repeatedInbound = 0
 
     /// 本次会话输入的 6 位配对码（重连时复用）
     private var savedPin: String?
