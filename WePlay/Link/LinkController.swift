@@ -267,8 +267,9 @@ final class LinkController {
                 diag.log("iAP2", "← ACK（ack=\(packet.acknowledgement)）")
             } else {
                 // **收到数据包必须立刻回 ACK**，否则对端每秒重传（b91 实测：iOS 连发 17 次）。
+                txSequence &+= 1
                 let ack = LinkPacket(control: LinkPacket.controlACK,
-                                     sequence: txSequence &+= 1,
+                                     sequence: txSequence,
                                      acknowledgement: packet.sequence,
                                      sessionID: LinkPacket.controlSessionID,
                                      payload: Data())
