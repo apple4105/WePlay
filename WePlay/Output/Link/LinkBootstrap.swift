@@ -113,11 +113,8 @@ final class LinkBootstrap: NSObject {
         lastPinCode = code
         onLog?("[link] 用户输入配对码：\(code)（长度 \(code.count)）——带进 Client Info 重发")
         guard isConnected, credentialWriteStarted else { return }
-        // 重置重试计数与重发现次数，给带码的写入一个完整的新阶梯
-        credentialAttempts = 0
-        rediscoveryCount = 0
-        credentialType = Link.typeNetworkBootstrap
-        requestCredentials()
+        // 输码后允许**额外再发一次**（带 pinCodeOrAuthentication），其余重试全部取消
+        requestCredentials(forceAfterPin: true)
     }
 
     // MARK: - 内部
@@ -155,7 +152,18 @@ final class LinkBootstrap: NSObject {
     /// 已重新发现服务的次数（最多 1 次，避免无限循环）
     private var rediscoveryCount = 0
 
-    private func requestCredentials() {
+    /// 是否已经用过"输码后再发一次"的机会
+    private var pinRetryUsed = false
+
+    private func requestCredentials(forceAfterPin: Bool = false) {
+        // 默认只发一次；只有"用户刚输入配对码"才允许额外一次
+        if credentialWriteStarted {
+            guard forceAfterPin, !pinRetryUsed else {
+                onLog?("[link] 已发过请求，跳过重复发送（避免身份/重试风暴）")
+                return
+            }
+            pinRetryUsed = true
+        }
         guard let peripheral, let phoneCharacteristic else {
             onFailure?(LinkError.characteristicMissing("phone \(Link.phoneCharacteristicUUID)"))
             return
@@ -177,7 +185,7 @@ final class LinkBootstrap: NSObject {
                 return String(data: d, encoding: .utf8) ?? "\"\(s)\""
             }
             var fields: [String] = [
-                "\"id\":\(esc(UUID().uuidString))",
+                "\"id\":\(esc(clientID))",
                 "\"name\":\(esc(HostIdentity.deviceName))",
                 "\"model\":\"iPhone\"",
                 "\"band\":0",
@@ -210,47 +218,16 @@ final class LinkBootstrap: NSObject {
         }
     }
 
-    /// 凭证回复看门狗：6 秒没收到 HeadUnitReply 就换 (type, 写入模式) 重发；
-    /// 两轮都失败后**重新发现服务与特征**再试一轮（OpenXPlay 0.4.0/428 同款对策）。
+    /// 凭证回复看门狗：**只等一次，不再重发**。
     ///
-    ///  ladder：
-    ///  - t=0   type=1001 + withoutResponse（绕开车机不回写确认）
-    ///  - t=6   type=1002 + withResponse
-    ///  - t=12  重新发现服务+特征 → 再发 type=1001 + withoutResponse
-    ///  - t=18  两轮都空 → 明确定性
+    /// 之前每 6 秒重发、12 秒还要 rediscover，而 `id` 每次都重新随机——
+    /// 同一次配对里对车机自称了四五个不同身份，等于中途换了四五台手机
+    /// （b91 成功时是一次干净请求、30ms 就回凭证；b97 连灌十几次全是静默）。
+    /// 真实手机的时序就是"写一次 Client Info，等车机回"。
     private func scheduleReplyWatchdog() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
             guard let self, self.replyPending else { return }
-            // 链路状态 + CCCD 状态一起打：区分"链路死了"和"车机不理"
-            let linkState = self.peripheral?.state == .connected ? "已连接" : "非连接(\(self.peripheral?.state.rawValue ?? -1))"
-            self.onLog?("[link] 链路状态：\(linkState)；CCCD 已启用：\(self.cccdEnabled)")
-            // **首次配对：不带码写了一次、车机没回 → 这时才请用户输入配对码。**
-            // 已配对过的车机会在第一次（不带码）就直接回凭证，永远走不到这里，
-            // 所以"以后不用再输码"是自然结果，不需要额外记状态。
-            if !self.hasPin {
-                self.onLog?("[link] 车机未回应不带码的请求——首次配对需要车机屏幕上的 6 位配对码")
-                self.onPinCodeRequired?("")
-            }
-            guard self.credentialAttempts < 1 else {
-                // 第二轮也空：OpenXPlay 的对策是重新发现服务（车机 GATT 数据库
-                // 可能在连接后被重新发布，旧的 characteristic 句柄已失效）
-                guard self.rediscoveryCount < 1 else {
-                    self.onLog?("[link] ⚠️ 重新发现后仍无凭证回复。车机对 ATT 读取（服务/特征发现）有响应、对写入与特征值读取无响应——典型原因是车机要求链路配对/加密，或其 BLE 栈不回写确认")
-                    return
-                }
-                self.rediscoveryCount += 1
-                self.onLog?("[link] ⚠️ 两次请求均无回复——重新发现服务与特征（OpenXPlay 同款对策）")
-                self.rediscoverServices()
-                return
-            }
-            self.credentialAttempts += 1
-            // **type 固定 1001**（Wi-Fi Direct / P2P GO）：长城车机自己生成 DIRECT- 热点、
-            // 手机加入，用户已确认这个拓扑。1002 是 SoftAP 型车机用的，这里不要。
-            // 这一轮的价值在于"如果用户已经输入了配对码，就用带码的 Client Info 重发"。
-            self.onLog?("[link] ⚠️ 6 秒无凭证回复——带码状态=\(self.hasPin) 重发 type=\(self.credentialType)")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-                self?.requestCredentials()
-            }
+            self.onLog?("[link] 6 秒无凭证回复（本轮不再重发，避免身份反复变化）")
         }
     }
 

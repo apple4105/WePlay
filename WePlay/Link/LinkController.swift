@@ -149,6 +149,19 @@ final class LinkController {
         }
     }
 
+    /// Client Info 的 `id`：**必须持久化固定**。
+    ///
+    /// 车机按 `id` 认设备（ft-app 也是持久化自己的 id 才有免码 quick 路径）。
+    /// 之前每次重发都新生成 UUID，同一次配对里对车机自称了四五个身份，
+    /// 等于中途换手机——这是 b97 静默的直接原因之一。
+    private static func stableClientID() -> String {
+        let key = "weplay.client.info.id"
+        if let v = UserDefaults.standard.string(forKey: key), !v.isEmpty { return v }
+        let v = UUID().uuidString
+        UserDefaults.standard.set(v, forKey: key)
+        return v
+    }
+
     /// M3: 启动虚拟 accessory（dlopen CoreAccessories → createConnection/Endpoint）
     private func startTransport() {
         let diag = Diagnostics.shared
@@ -471,8 +484,7 @@ final class LinkController {
         // （依据 ft-app `IccoaClientProfile.kt`，注释写明是给 UCAR 车机的兼容身份）
         let mac = transport?.accessoryMAC ?? "02:00:00:00:00:00"
         bleBootstrap.accessoryMAC = mac
-        let digest = SHA256.hash(data: identity?.leafCertificate ?? Data())
-        bleBootstrap.clientID = digest.prefix(3).map { String(format: "%02x", $0) }.joined()
+        bleBootstrap.clientID = Self.stableClientID()
         // 重连时沿用本次会话已输入的配对码（车机码约 120 秒刷新，会话内复用）
         if let pin = savedPin { bleBootstrap.submitPinCode(pin) }
         bleBootstrap.onLog = { diag.log("BLE", $0) }
@@ -504,6 +516,9 @@ final class LinkController {
                 diag.log("BLE", "后台自动发现：车机已连上，等待凭证（不限时）")
                 return
             }
+            // 相位推进到"已连车机"，UI 才会显示 20% + 「正在拿取网络凭证」，
+            // 而不是一直停在"搜索中"（b97 里用户看到的"卡 20% 都没有"就是这个）
+            if self.phase == .bleScanning { self.phase = .bleConnected }
             diag.log("BLE", "车机已连上，等待凭证回复（最长 20 秒）")
             let replyTimeout = DispatchWorkItem { [weak self] in
                 guard let self, self.cachedReply == nil,
