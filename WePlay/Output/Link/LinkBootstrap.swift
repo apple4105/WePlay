@@ -316,10 +316,6 @@ extension LinkBootstrap: CBCentralManagerDelegate {
         if loggedPeripherals.insert(peripheral.identifier).inserted {
             scannedDeviceCount += 1
         }
-    } else {
-                onLog?("[link] 周围设备：\(name) RSSI \(RSSI) 服务[\(svc)]")
-            }
-        }
     }
 
     /// 系统恢复蓝牙状态（App 被杀后 BLE 事件把它拉回后台时走这里）
