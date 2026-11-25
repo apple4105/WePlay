@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import CryptoKit
+import Security
 
 /// 链路子系统总控——把所有模块串成完整管线。
 ///
@@ -115,6 +116,57 @@ final class LinkController {
         self.authenticator?.onLog = { Diagnostics.shared.log("认证", $0) }
         phase = .identityLoaded
         Diagnostics.shared.log("身份", "✅ 证书 \(identity.leafCertificate.count) B / 私钥 \(identity.privateKeyRaw.count) B")
+        logEntitlements()
+    }
+
+    /// 打印签名 entitlements——用来确定 `NEHotspotConfiguration` 到底能不能用。
+    ///
+    /// b91 实测 `apply()` 返回 `NEHotspotConfigurationErrorDomain Code=8 "internal error."`：
+    /// 按枚举 8 = invalidHS20Settings、14 = internal，两者矛盾，所以不能凭报错断言
+    /// 是"缺 entitlement"。直接读 App 里嵌入的 provisioning profile 才是一手证据。
+    private func logEntitlements() {
+        let diag = Diagnostics.shared
+        // ① 读 embedded.mobileprovision（AltStore 侧载时会嵌入），直接搜权限名
+        if let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+           let data = try? Data(contentsOf: url) {
+            let text = String(decoding: data, as: UTF8.self)
+            let hasHotspot = text.contains("com.apple.developer.networking.HotspotConfiguration")
+            diag.log("签名", "embedded.mobileprovision \(data.count) B；含 HotspotConfiguration = \(hasHotspot)")
+            // 顺带把 profile 里出现的 com.apple.developer.* 权限名列出来
+            var found = Set<String>()
+            var rest = Substring(text)
+            while let r = rest.range(of: "com.apple.developer.") {
+                var end = r.lowerBound
+                while end < text.endIndex,
+                      text[end].isLetter || text[end].isNumber || text[end] == "." || text[end] == "-" {
+                    end = text.index(after: end)
+                }
+                found.insert(String(text[r.lowerBound..<end]))
+                rest = text[end...]
+            }
+            diag.log("签名", "profile 里的 developer 权限：\(found.sorted().joined(separator: ", "))")
+        } else {
+            diag.log("签名", "没找到 embedded.mobileprovision（可能被移除或未签名嵌入）")
+        }
+        // ② 用 Security.framework 读当前进程的签名信息里带的 entitlements
+        var code: SecCode?
+        if SecCodeCopySelf([], &code) == errSecSuccess, let code {
+            var info: CFDictionary?
+            let flags = SecCodeSigningInformationFlags(rawValue: 2)   // kSecCSSigningInformation
+            if SecCodeCopySigningInformation(code, flags, &info) == errSecSuccess,
+               let dict = info as? [String: Any] {
+                if let ents = dict["entitlements"] as? [String: Any] {
+                    diag.log("签名", "运行时代码签名 entitlements：\(ents.keys.sorted().joined(separator: ", "))")
+                    diag.log("签名", "HotspotConfiguration 授权 = \(ents["com.apple.developer.networking.HotspotConfiguration"] != nil)")
+                } else {
+                    diag.log("签名", "代码签名里没有 entitlements 字典（键：\(dict.keys.sorted().joined(separator: ", "))）")
+                }
+            } else {
+                diag.log("签名", "SecCodeCopySigningInformation 失败")
+            }
+        } else {
+            diag.log("签名", "SecCodeCopySelf 失败")
+        }
     }
 
     /// M3: 启动虚拟 accessory（dlopen CoreAccessories → createConnection/Endpoint）
