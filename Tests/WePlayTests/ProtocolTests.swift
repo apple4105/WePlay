@@ -2,6 +2,61 @@ import XCTest
 @testable import WePlay
 
 final class ProtocolTests: XCTestCase {
+    func testSYNTableParsesNegotiatedControlSession() throws {
+        let payload = Data([
+            1, 8, 0xFF, 0xFF, 0x03, 0xE8, 0x00, 0x0A, 30, 0,
+            10, 0, 0,       // control session 10
+            11, 2, 0,       // external accessory session 11
+            12, 1, 0        // file/data session 12
+        ])
+
+        let syn = try LinkPacket.SYNParameters.parse(payload)
+
+        XCTAssertEqual(syn.controlSessionID, 10)
+        XCTAssertEqual(syn.entries.map(\.id), [10, 11, 12])
+        XCTAssertEqual(syn.entries.map(\.type), [0, 2, 1])
+        XCTAssertEqual(syn.raw, payload)
+    }
+
+    func testSYNTableRejectsDuplicateOrFlaggedEntries() {
+        let duplicate = Data([1, 8, 0xFF, 0xFF, 0x03, 0xE8, 0x00, 0x0A, 30, 0,
+                              10, 0, 0, 10, 2, 0])
+        XCTAssertThrowsError(try LinkPacket.SYNParameters.parse(duplicate))
+
+        let flagged = Data([1, 8, 0xFF, 0xFF, 0x03, 0xE8, 0x00, 0x0A, 30, 0,
+                            10, 0x80, 0])
+        XCTAssertThrowsError(try LinkPacket.SYNParameters.parse(flagged))
+    }
+
+    func testLinkParserUsesNegotiatedNonzeroControlSession() {
+        let message = LinkMessage(id: 0x1D01,
+                                  parameters: [LinkParameter(id: 1, string: "WePlay")]).encoded()
+        let packet = LinkPacket(control: LinkPacket.controlACK, sequence: 1,
+                                sessionID: 10, payload: message).encode()
+        let parser = LinkParser()
+        parser.controlSessionID = 10
+        var ids: [UInt16] = []
+        parser.onMessage = { ids.append($0.id) }
+
+        parser.append(packet)
+
+        XCTAssertEqual(ids, [0x1D01])
+    }
+
+    func testLinkParserDoesNotTreatOtherSessionAsControl() {
+        let message = LinkMessage(id: 0x1D01).encoded()
+        let packet = LinkPacket(control: LinkPacket.controlACK, sequence: 1,
+                                sessionID: 11, payload: message).encode()
+        let parser = LinkParser()
+        parser.controlSessionID = 10
+        var called = false
+        parser.onMessage = { _ in called = true }
+
+        parser.append(packet)
+
+        XCTAssertFalse(called)
+    }
+
     func testLinkParserCarriesMessageAcrossPackets() {
         let message = LinkMessage(id: 0x1D01, parameters: [
             LinkParameter(id: 1, string: "WePlay"),
@@ -15,6 +70,7 @@ final class ProtocolTests: XCTestCase {
                                 sessionID: LinkPacket.controlSessionID,
                                 payload: message.dropFirst(split)).encode()
         let parser = LinkParser()
+        parser.controlSessionID = LinkPacket.controlSessionID
         var messages: [LinkMessage] = []
         parser.onMessage = { messages.append($0) }
 
@@ -39,6 +95,7 @@ final class ProtocolTests: XCTestCase {
                                 sessionID: LinkPacket.controlSessionID,
                                 payload: first + second).encode()
         let parser = LinkParser()
+        parser.controlSessionID = LinkPacket.controlSessionID
         var ids: [UInt16] = []
         parser.onMessage = { ids.append($0.id) }
 

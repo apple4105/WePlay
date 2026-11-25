@@ -205,12 +205,26 @@ def main():
     assert recovered is not None and recovered["id"] == 0x1D01
     print("10. 消息跨链路包边界拼接 OK")
 
-    # 11. identification 实际编码形状抽查：param 1 = "CP-Receiver-1"
+    # 11. SYN session table：控制/EA/文件 session 必须由线上条目决定
+    syn_payload = bytes([
+        1, 8, 0xFF, 0xFF, 0x03, 0xE8, 0x00, 0x0A, 30, 0,
+        10, 0, 0, 11, 2, 0, 12, 1, 0,
+    ])
+    # v1 的条目从偏移 10 起，每条 3 字节；type 0 是控制 session。
+    assert len(syn_payload) == 19
+    entries = [syn_payload[i:i + 3] for i in range(10, len(syn_payload), 3)]
+    assert [(e[0], e[1] & 0x7F, e[2]) for e in entries] == [(10, 0, 0), (11, 2, 0), (12, 1, 0)]
+    assert all(e[0] != 0 and (e[1] & 0x80) == 0 for e in entries)
+    assert len({e[0] for e in entries}) == len(entries)
+    assert len({e[1] & 0x7F for e in entries}) == len(entries)
+    print("11. SYN session table 解析/唯一性检查 OK")
+
+    # 12. identification 实际编码形状抽查：param 1 = "CP-Receiver-1"
     ident = encode_message(0x1D01, [(1, b"CP-Receiver-1")])
     assert ident[0:2] == b"\x40\x40"
     assert ident[2:4] == struct.pack(">H", len(ident))   # 长度 = 整条消息字节数
     assert ident[4:6] == b"\x1d\x01"
-    print("11. identification 编码形状 OK  (%s)" % ident.hex())
+    print("12. identification 编码形状 OK  (%s)" % ident.hex())
 
     print("\n全部通过 [OK]   （若真机握手日志与此不一致，按诊断 hex 只改 encode/decode 一处）")
 

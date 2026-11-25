@@ -133,6 +133,125 @@ struct LinkPacket: Equatable {
         return out
     }
 
+    struct SYNEntry: Equatable {
+        let id: UInt8
+        let type: UInt8
+        let second: UInt8
+    }
+
+    struct SYNParameters: Equatable {
+        let version: UInt8
+        let maxOutstandingPackets: UInt8
+        let maxPacketSize: UInt16
+        let acknowledgementTimeout: UInt16
+        let cumulativeAcknowledgementTimeout: UInt16
+        let maxRetransmissions: UInt8
+        let maxCumulativeAcknowledgements: UInt8
+        let extensionBytes: Data
+        let entries: [SYNEntry]
+        let raw: Data
+
+        /// Parse the on-wire SYN payload. Version 1 has no explicit entry count;
+        /// each remaining three bytes form one entry. Version 2+ carries extension
+        /// length and entry count before the entries.
+        static func parse(_ payload: Data) throws -> SYNParameters {
+            guard payload.count >= 10 else { throw LinkPacketError.invalidSYN("too_short") }
+            let version = payload[0]
+            guard version <= 3 else { throw LinkPacketError.invalidSYN("version") }
+            let mop = payload[1]
+            let maxPacket = UInt16(payload[2]) << 8 | UInt16(payload[3])
+            let ackTimeout = UInt16(payload[4]) << 8 | UInt16(payload[5])
+            let cumAckTimeout = UInt16(payload[6]) << 8 | UInt16(payload[7])
+            let retransmissions = payload[8]
+            let maxCumAck = payload[9]
+            var offset = 10
+            var extensions = Data()
+            var count: Int
+
+            if version >= 2 {
+                guard payload.count >= 12 else { throw LinkPacketError.invalidSYN("extension_header") }
+                let extensionCount = Int(payload[offset])
+                offset += 1
+                guard extensionCount <= 5, offset + extensionCount < payload.count else {
+                    throw LinkPacketError.invalidSYN("extension_length")
+                }
+                extensions = Data(payload[offset ..< offset + extensionCount])
+                offset += extensionCount
+                count = Int(payload[offset])
+                offset += 1
+                guard count <= 5 else { throw LinkPacketError.invalidSYN("entry_count") }
+            } else {
+                guard (payload.count - offset) % 3 == 0 else {
+                    throw LinkPacketError.invalidSYN("entry_alignment")
+                }
+                count = (payload.count - offset) / 3
+            }
+
+            guard count > 0, offset + count * 3 == payload.count else {
+                throw LinkPacketError.invalidSYN("entry_length")
+            }
+            guard mop == 0 || (1...127).contains(mop) else {
+                throw LinkPacketError.invalidSYN("mop")
+            }
+            guard maxPacket > 23 else { throw LinkPacketError.invalidSYN("max_packet") }
+            let noRetransmit = ackTimeout == 0 && cumAckTimeout == 0
+                && retransmissions == 0 && maxCumAck == 0
+            if !noRetransmit {
+                guard ackTimeout > 19, (10...32767).contains(cumAckTimeout),
+                      (1...30).contains(retransmissions), maxCumAck <= mop else {
+                    throw LinkPacketError.invalidSYN("timers")
+                }
+            }
+
+            var entries = [SYNEntry]()
+            var ids = Set<UInt8>()
+            var types = Set<UInt8>()
+            for index in 0..<count {
+                let at = offset + index * 3
+                let id = payload[at]
+                let encodedType = payload[at + 1]
+                let type = encodedType & 0x7F
+                guard id != 0, encodedType & 0x80 == 0, type <= 4,
+                      ids.insert(id).inserted, types.insert(type).inserted else {
+                    throw LinkPacketError.invalidSYN("entry")
+                }
+                entries.append(SYNEntry(id: id, type: type, second: payload[at + 2]))
+            }
+            guard entries.contains(where: { $0.type == 0 }) else {
+                throw LinkPacketError.invalidSYN("missing_control_entry")
+            }
+            return SYNParameters(version: version,
+                                 maxOutstandingPackets: mop,
+                                 maxPacketSize: maxPacket,
+                                 acknowledgementTimeout: ackTimeout,
+                                 cumulativeAcknowledgementTimeout: cumAckTimeout,
+                                 maxRetransmissions: retransmissions,
+                                 maxCumulativeAcknowledgements: maxCumAck,
+                                 extensionBytes: extensions,
+                                 entries: entries,
+                                 raw: payload)
+        }
+
+        var controlSessionID: UInt8? {
+            entries.first(where: { $0.type == 0 })?.id
+        }
+
+        var summary: String {
+            let table = entries.map { "\($0.id):\($0.type):\($0.second)" }.joined(separator: ",")
+            return "v=\(version) mop=\(maxOutstandingPackets) max=\(maxPacketSize) table=[\(table)]"
+        }
+    }
+
+    enum LinkPacketError: Error, CustomStringConvertible {
+        case invalidSYN(String)
+
+        var description: String {
+            switch self {
+            case .invalidSYN(let reason): return "无效 SYN：\(reason)"
+            }
+        }
+    }
+
     enum DecodeResult {
         /// 解出一个包，consumed 为占用的字节数
         case packet(LinkPacket, consumed: Int)

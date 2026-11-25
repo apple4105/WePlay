@@ -195,6 +195,7 @@ final class LinkController {
 
         // LinkParser 解 iAP2 包，消息/原始数据都打日志
         linkParser = LinkParser()
+        linkParser.controlSessionID = nil
         linkParser.onPacket = { [weak self] packet in
             guard let self else { return }
             // **相同包去重**：iOS 在对端没 ACK 时会原样重传（b91 里同一个 16B 包发了 17 次），
@@ -243,6 +244,8 @@ final class LinkController {
     private var identificationSent = false
     /// 链路是否已协商完成（收到 SYN-ACK 并回 ACK 之后）
     private var linkConnected = false
+    /// 对端 SYN 表宣告的控制会话 ID；未协商前不发送 CSM。
+    private var negotiatedControlSessionID: UInt8?
 
     /// 发送 SYN。
     ///
@@ -288,26 +291,39 @@ final class LinkController {
         let isACK = packet.control & LinkPacket.controlACK != 0
 
         if isSYN && isACK {
-            // 对端 SYN-ACK：回 ACK，链路进入 Connected，**然后**才发 identification
-            diag.log("iAP2", "← SYN-ACK（seq=\(packet.sequence)）→ 回 ACK，链路 Connected")
+            // 对端 SYN-ACK：解析并保存 session table，ACK 使用握手包自己的 session。
+            guard let syn = try? LinkPacket.SYNParameters.parse(packet.payload),
+                  let controlID = syn.controlSessionID else {
+                diag.error("iAP2", "← SYN-ACK 参数无效，拒绝进入 Connected")
+                return
+            }
+            negotiatedControlSessionID = controlID
+            linkParser.controlSessionID = controlID
+            diag.log("iAP2", "← SYN-ACK（seq=\(packet.sequence)，session=\(packet.sessionID)）table=\(syn.summary) → 回 ACK")
             let ack = LinkPacket(control: LinkPacket.controlACK,
                                  sequence: 0,
                                  acknowledgement: packet.sequence,
-                                 sessionID: LinkPacket.controlSessionID,
+                                 sessionID: packet.sessionID,
                                  payload: Data())
             sendRaw(ack.encode())
             markLinkConnected()
             return
         }
         if isSYN {
-            // 对端先发 SYN：回 SYN-ACK（ACK 位 + 自己的 SYN payload）
-            diag.log("iAP2", "← 对端 SYN（seq=\(packet.sequence)）→ 回 SYN-ACK")
-            let synPayload = Data([1, 8, 0xFF, 0xFF, 0x03, 0xE8, 0x00, 0x0A, 30, 0, 1, 0, 0])
+            // 对端先发 SYN：校验并原样回显其协商表，再进入 Connected。
+            guard let syn = try? LinkPacket.SYNParameters.parse(packet.payload),
+                  let controlID = syn.controlSessionID else {
+                diag.error("iAP2", "← 对端 SYN 参数无效，拒绝回 SYN-ACK")
+                return
+            }
+            negotiatedControlSessionID = controlID
+            linkParser.controlSessionID = controlID
+            diag.log("iAP2", "← 对端 SYN（seq=\(packet.sequence)，session=\(packet.sessionID)）table=\(syn.summary) → 回显 SYN-ACK")
             let synack = LinkPacket(control: LinkPacket.controlSYN | LinkPacket.controlACK,
                                     sequence: 0,
                                     acknowledgement: packet.sequence,
-                                    sessionID: LinkPacket.controlSessionID,
-                                    payload: synPayload)
+                                    sessionID: packet.sessionID,
+                                    payload: syn.raw)
             sendRaw(synack.encode())
             markLinkConnected()
             return
@@ -321,7 +337,7 @@ final class LinkController {
                 let ack = LinkPacket(control: LinkPacket.controlACK,
                                      sequence: txSequence,
                                      acknowledgement: packet.sequence,
-                                     sessionID: LinkPacket.controlSessionID,
+                                     sessionID: packet.sessionID,
                                      payload: Data())
                 sendRaw(ack.encode())
                 diag.log("iAP2", "← 数据包 seq=\(packet.sequence)（\(packet.payload.count) B）→ 已回 ACK")
@@ -350,11 +366,15 @@ final class LinkController {
 
     /// 链路层发包：ACK 位 + 递增序列 + 对端确认号
     private func send(message: LinkMessage) {
+        guard let sessionID = negotiatedControlSessionID else {
+            Diagnostics.shared.warn("iAP2", "丢弃 CSM 0x\(String(message.id, radix: 16))：尚未协商控制 session")
+            return
+        }
         txSequence &+= 1
         let packet = LinkPacket(control: LinkPacket.controlACK,
                                 sequence: txSequence,
                                 acknowledgement: rxSequence,
-                                sessionID: LinkPacket.controlSessionID,
+                                sessionID: sessionID,
                                 payload: message.encoded())
         sendRaw(packet.encode())
     }
@@ -860,6 +880,8 @@ final class LinkController {
         transport = nil
         // 链路层状态一并复位，否则下次点「启动」不会重新发 SYN/identification
         linkConnected = false
+        negotiatedControlSessionID = nil
+        linkParser?.controlSessionID = nil
         identificationSent = false
         savedPin = nil
         txSequence = 0

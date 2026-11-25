@@ -17,6 +17,9 @@ final class LinkParser {
     /// 解出一条控制会话消息
     var onMessage: ((LinkMessage) -> Void)?
 
+    /// 当前协商出的控制会话 ID。未设置时不解析业务消息。
+    var controlSessionID: UInt8?
+
     /// 原始包 hex（真机联调时打开，用来核对包头布局）
     var onRawPacket: ((Data) -> Void)?
 
@@ -37,6 +40,7 @@ final class LinkParser {
     func reset() {
         buffer.removeAll(keepingCapacity: true)
         messageBuffer.removeAll(keepingCapacity: true)
+        controlSessionID = nil
     }
 
     private func drain() {
@@ -62,8 +66,9 @@ final class LinkParser {
                 buffer.removeSubrange(0 ..< consumed)
                 onPacket?(packet)
 
-                // 控制会话里再拆消息
-                if packet.sessionID == LinkPacket.controlSessionID, !packet.payload.isEmpty {
+                // 只在协商出的控制会话里拆 CSM；未协商或其他 session 只保留包级回调。
+                if let controlSessionID, packet.sessionID == controlSessionID,
+                   !packet.payload.isEmpty {
                     parseMessages(packet.payload)
                 }
             }
