@@ -30,8 +30,10 @@ jobs:
           xcodegen generate
       - name: XCTest
         run: |
+          DESTINATION=$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/ { print $2; exit }')
+          test -n "$DESTINATION"
           xcodebuild test \
             -project WePlay.xcodeproj \
             -scheme WePlay \
-            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
+            -destination "platform=iOS Simulator,id=$DESTINATION" \
             CODE_SIGNING_ALLOWED=NO

@@ -50,14 +50,6 @@ jobs:
           python3 -I Tools/link_selftest.py
           python3 -I Tools/rtp_selftest.py
 
-      - name: Unit tests
-        run: |
-          xcodebuild test \
-            -project WePlay.xcodeproj \
-            -scheme WePlay \
-            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
-            CODE_SIGNING_ALLOWED=NO
-
       # 构建号 = run number，让真机上能区分装的是哪一次构建
       - name: Stamp version
         run: |
