@@ -1,7 +1,6 @@
 import Foundation
 import UIKit
 import CryptoKit
-import Security
 
 /// 链路子系统总控——把所有模块串成完整管线。
 ///
@@ -147,25 +146,6 @@ final class LinkController {
             diag.log("签名", "profile 里的 developer 权限：\(found.sorted().joined(separator: ", "))")
         } else {
             diag.log("签名", "没找到 embedded.mobileprovision（可能被移除或未签名嵌入）")
-        }
-        // ② 用 Security.framework 读当前进程的签名信息里带的 entitlements
-        var code: SecCode?
-        if SecCodeCopySelf([], &code) == errSecSuccess, let code {
-            var info: CFDictionary?
-            let flags = SecCodeSigningInformationFlags(rawValue: 2)   // kSecCSSigningInformation
-            if SecCodeCopySigningInformation(code, flags, &info) == errSecSuccess,
-               let dict = info as? [String: Any] {
-                if let ents = dict["entitlements"] as? [String: Any] {
-                    diag.log("签名", "运行时代码签名 entitlements：\(ents.keys.sorted().joined(separator: ", "))")
-                    diag.log("签名", "HotspotConfiguration 授权 = \(ents["com.apple.developer.networking.HotspotConfiguration"] != nil)")
-                } else {
-                    diag.log("签名", "代码签名里没有 entitlements 字典（键：\(dict.keys.sorted().joined(separator: ", "))）")
-                }
-            } else {
-                diag.log("签名", "SecCodeCopySigningInformation 失败")
-            }
-        } else {
-            diag.log("签名", "SecCodeCopySelf 失败")
         }
     }
 
