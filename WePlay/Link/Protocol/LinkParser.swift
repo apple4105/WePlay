@@ -24,6 +24,8 @@ final class LinkParser {
     var onError: ((String) -> Void)?
 
     private var buffer = Data()
+    private var messageBuffer = Data()
+    private let maxMessageBufferSize = 65_536
 
     init() {}
 
@@ -34,6 +36,7 @@ final class LinkParser {
 
     func reset() {
         buffer.removeAll(keepingCapacity: true)
+        messageBuffer.removeAll(keepingCapacity: true)
     }
 
     private func drain() {
@@ -68,19 +71,22 @@ final class LinkParser {
     }
 
     private func parseMessages(_ payload: Data) {
-        var data = payload
-        while !data.isEmpty {
-            switch LinkMessage.parse(data) {
+        guard messageBuffer.count + payload.count <= maxMessageBufferSize else {
+            onError?("[LinkParser] 消息缓存超限（\(maxMessageBufferSize) B），丢弃缓存")
+            messageBuffer.removeAll(keepingCapacity: true)
+            return
+        }
+        messageBuffer.append(payload)
+        while !messageBuffer.isEmpty {
+            switch LinkMessage.parse(messageBuffer) {
             case .needMore:
-                // 一条消息被拆到多个包里：v1 先按"整包一条消息"处理，
-                // 真机若出现跨包消息，再在这里加消息级缓冲。
-                onError?("[LinkParser] 消息跨包，暂不处理（\(data.count) B 残留）")
                 return
             case .badFormat:
-                onError?("[LinkParser] 消息格式错误，\(data.count) B")
+                onError?("[LinkParser] 消息格式错误，\(messageBuffer.count) B")
+                messageBuffer.removeAll(keepingCapacity: true)
                 return
             case .message(let message, let consumed):
-                data.removeSubrange(0 ..< consumed)
+                messageBuffer.removeSubrange(0 ..< consumed)
                 onMessage?(message)
             }
         }

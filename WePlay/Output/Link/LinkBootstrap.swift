@@ -94,13 +94,10 @@ final class LinkBootstrap: NSObject {
         headUnitCharacteristic = nil
         loggedPeripherals.removeAll()
         replyPending = false
-        credentialAttempts = 0
-        credentialType = Link.typeNetworkBootstrap
-        descriptorDiscovered = false
-        rediscoveryCount = 0
         cccdEnabled = false
-        didResendAfterCccd = false
         credentialWriteStarted = false
+        pinPromptIssued = false
+        pinRetryUsed = false
     }
 
     /// 用户在 UI 里输入了配对码后调用。
@@ -111,7 +108,7 @@ final class LinkBootstrap: NSObject {
     /// client without replaying an obsolete **six-digit PIN**」——已配对才免码。
     func submitPinCode(_ code: String) {
         lastPinCode = code
-        onLog?("[link] 用户输入配对码：\(code)（长度 \(code.count)）——带进 Client Info 重发")
+        onLog?("[link] 用户已输入配对码（长度 \(code.count)）——带进 Client Info 重发")
         guard isConnected, credentialWriteStarted else { return }
         // 输码后允许**额外再发一次**（带 pinCodeOrAuthentication），其余重试全部取消
         requestCredentials(forceAfterPin: true)
@@ -125,9 +122,6 @@ final class LinkBootstrap: NSObject {
     /// 是否已经拿到配对码（UI 据此决定要不要提前弹框）
     var hasPin: Bool { !(lastPinCode ?? "").isEmpty }
 
-    /// 描述符是否发现成功（3 秒兜底订阅用）
-    private var descriptorDiscovered = false
-
     /// CCCD 是否已确认启用（启用后要按官方顺序补发请求）
     private var cccdEnabled = false
 
@@ -137,20 +131,11 @@ final class LinkBootstrap: NSObject {
     /// 写回调里拿到的 peripheral（委托方法参数，供订阅用）
     private var peripheral_: CBPeripheral?
 
-    /// 是否已经因"CCCD 启用"补发过请求（避免重复发）
-    private var didResendAfterCccd = false
-
-    /// 凭证请求重试计数
-    private var credentialAttempts = 0
-
-    /// 当前这一轮用的 type（1001 初始 / 1002 二轮）
-    private var credentialType: Int = Link.typeNetworkBootstrap
+    /// 是否已经提示用户输入配对码
+    private var pinPromptIssued = false
 
     /// 是否在等凭证回复（看门狗用）
     private var replyPending = false
-
-    /// 已重新发现服务的次数（最多 1 次，避免无限循环）
-    private var rediscoveryCount = 0
 
     /// 是否已经用过"输码后再发一次"的机会
     private var pinRetryUsed = false
@@ -194,21 +179,15 @@ final class LinkBootstrap: NSObject {
             if let pin = lastPinCode, !pin.isEmpty {
                 fields.append("\"pinCodeOrAuthentication\":\(esc(pin))")
             }
-            fields.append("\"type\":\(credentialType)")
+            fields.append("\"type\":\(Link.typeNetworkBootstrap)")
             let json = Data(("{" + fields.joined(separator: ",") + "}").utf8)
 
-            // **第一轮用 withResponse**——和官方 Android 的 `gatt.write()`（默认
-            // WRITE_TYPE_DEFAULT = 需确认）一致。这一轮最有诊断价值：
-            //   · 回 `写特征成功` → 车机确实收到请求，问题在后面
-            //   · 回 `写特征失败: <ATT code>` → 直接告诉我们车机拒绝的原因
-            //   · 完全静默 → 写入没发出去（队列被堵或链路异常）
-            let maxWithout = peripheral.maximumWriteValueLength(for: .withoutResponse)
+            // 保留当前真机验证过的 withResponse 写入顺序；BLE 回复可能由通知送达。
             let maxWith = peripheral.maximumWriteValueLength(for: .withResponse)
-            let writeType: CBCharacteristicWriteType =
-                (credentialAttempts == 0 && json.count <= maxWith) ? .withResponse : .withoutResponse
+            let writeType: CBCharacteristicWriteType = json.count <= maxWith ? .withResponse : .withoutResponse
 
-            onLog?("[link] 写入上限：withoutResponse=\(maxWithout) B / withResponse=\(maxWith) B；请求 \(json.count) B")
-            onLog?("[link] → PhoneRequest type=\(credentialType) 第\(credentialAttempts + 1)次 \(writeType == .withResponse ? "withResponse（要车机回写确认）" : "withoutResponse（不等 ACK）")：\(String(data: json, encoding: .utf8) ?? "")")
+            onLog?("[link] 写入上限：withResponse=\(maxWith) B；请求 \(json.count) B")
+            onLog?("[link] → PhoneRequest（\(writeType == .withResponse ? "withResponse" : "withoutResponse")，PIN=\(lastPinCode == nil ? "无" : "有")）")
 
             replyPending = true
             peripheral.writeValue(json, for: phoneCharacteristic, type: writeType)
@@ -226,27 +205,14 @@ final class LinkBootstrap: NSObject {
     /// 真实手机的时序就是"写一次 Client Info，等车机回"。
     private func scheduleReplyWatchdog() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
-            guard let self, self.replyPending else { return }
-            self.onLog?("[link] 6 秒无凭证回复（本轮不再重发，避免身份反复变化）")
+            guard let self, self.replyPending, !self.pinPromptIssued,
+                  self.lastPinCode == nil else { return }
+            self.pinPromptIssued = true
+            self.onLog?("[link] 6 秒无凭证回复，提示输入车机屏幕配对码")
+            self.onPinCodeRequired?("")
         }
     }
 
-    /// 重新发现服务与特征。
-    ///
-    /// OpenXPlay 0.4.0/428：「蓝牙找到车机但读不到车机服务时，会重新发现服务」。
-    /// 车机 GATT 数据库可能在连接后被重新发布（或首轮发现拿到的是陈旧句柄），
-    /// 重新发现能让后续读写落到正确的句柄上。
-    private func rediscoverServices() {
-        guard let peripheral else { return }
-        credentialAttempts = 0
-        credentialType = Link.typeNetworkBootstrap
-        descriptorDiscovered = false
-        cccdEnabled = false
-        didResendAfterCccd = false
-        phoneCharacteristic = nil
-        headUnitCharacteristic = nil
-        peripheral.discoverServices([Link.serviceUUID])
-    }
 }
 
 // MARK: - CBCentralManagerDelegate
@@ -368,10 +334,7 @@ extension LinkBootstrap: CBPeripheralDelegate {
             }
         }
 
-        // ⚠️ 这里**不再 readValue(…102)**：车机对该特征读取一律回
-        // CBATTErrorDomain Code=2 "Reading is not permitted"，失败操作还会冲刷队列。
-        //
-        // **先写 Client Info，订阅留到最后**（见 didWriteValueFor 的说明）。
+        // 保持 b91 曾收到车机回复的写入先行顺序；订阅回调只更新状态，不重复发请求。
         requestCredentials()
         if let headUnitCharacteristic {
             peripheral.discoverDescriptors(for: headUnitCharacteristic)
@@ -398,10 +361,8 @@ extension LinkBootstrap: CBPeripheralDelegate {
         error: Error?
     ) {
         guard characteristic.uuid == Link.headUnitCharacteristicUUID else { return }
-        descriptorDiscovered = true
         if let error {
-            onLog?("[link] 描述符发现失败：\(error.localizedDescription)——直接写 PhoneRequest")
-            requestCredentials()
+            onLog?("[link] 描述符发现失败：\(error.localizedDescription)；保留当前请求，不重复写入")
             return
         }
         let names = characteristic.descriptors?.map { $0.uuid.uuidString } ?? []
@@ -446,22 +407,17 @@ extension LinkBootstrap: CBPeripheralDelegate {
         } else {
             onLog?("[link] ✅ CCCD 订阅已确认（isNotifying=\(characteristic.isNotifying)）")
             cccdEnabled = characteristic.isNotifying
-            // 先写一次 Client Info。**不带码时就能回凭证 = 已配对过**（quick 路径），
-            // 那就永远不用输码；只有车机不回、看门狗超时之后才弹配对码框。
-            requestCredentials()
         }
     }
 
-    /// CCCD 启用后按官方顺序补发一次 PhoneRequest。
+    /// 车机通过通知推送凭证；请求只在特征发现时发送一次。
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard characteristic.uuid == Link.headUnitCharacteristicUUID else { return }
         if let error { onFailure?(error); return }
         guard let data = characteristic.value, !data.isEmpty else { return }
 
         replyPending = false
-        credentialAttempts = 0
-        let raw = String(data: data, encoding: .utf8) ?? data.hexString
-        onLog?("[link] ← HeadUnitReply (\(data.count) B)：\(raw)")
+        onLog?("[link] ← HeadUnitReply (\(data.count) B；内容已隐藏)")
 
         do {
             let reply = try Link.HeadUnitReply.parse(data)

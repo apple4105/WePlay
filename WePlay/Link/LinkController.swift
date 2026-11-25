@@ -191,13 +191,6 @@ final class LinkController {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
                 self?.sendSYN()
             }
-            // 兜底：2.5 秒内没等到 SYN-ACK（链路没进 Connected），仍发一次
-            // identification——纯粹为了让日志能记录"我们尝试过"，不作为正常路径。
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-                guard let self, !self.identificationSent else { return }
-                diag.warn("iAP2", "2.5 秒未收到 SYN-ACK（链路未进入 Connected）——仍尝试 identification 供诊断")
-                self.sendIdentification()
-            }
         }
 
         // LinkParser 解 iAP2 包，消息/原始数据都打日志
@@ -499,10 +492,9 @@ final class LinkController {
             self.joinCarWiFi(reply)
         }
         // 配对码由 UI 输入后调 bleBootstrap.submitPinCode(_:)
-        bleBootstrap.onPinCodeRequired = { code in
-            diag.log("BLE", "车机要求配对码——请查看车机屏幕上的 6 位数字并输入")
+        bleBootstrap.onPinCodeRequired = { _ in
+            diag.log("BLE", "车机未返回网络凭证——请查看屏幕配对码并输入")
             DispatchQueue.main.async { PipelineState.shared.pinRequired = true }
-            _ = code
         }
 
         let foreground = UIApplication.shared.applicationState == .active
@@ -562,6 +554,15 @@ final class LinkController {
         Diagnostics.shared.log("管线", "已停止扫描")
     }
 
+    /// 用户手动切换到车机 Wi-Fi 后继续使用已缓存凭证，不再重复调用 NEHotspot。
+    func resumeAfterManualWiFiJoin() {
+        guard phase == .wifiManualJoin, let reply = cachedReply else { return }
+        DispatchQueue.main.async { PipelineState.shared.manualJoin = nil }
+        phase = .wifiJoined
+        Diagnostics.shared.log("管线", "用户确认已手动加入车机 Wi-Fi，继续 Carlink")
+        startWFD(reply)
+    }
+
     /// 加入车机网络。NEHotspot 失败自动重试一次；系统对记住的网络通常会自己回连。
     private func joinCarWiFi(_ reply: Link.HeadUnitReply) {
         let diag = Diagnostics.shared
@@ -580,7 +581,7 @@ final class LinkController {
             self.startWFD(reply)
         }
         wifiJoiner.onManualJoinRequired = { [weak self] (ssid, psk) in
-            diag.warn("WiFi", "需要手动加入：SSID=\(ssid) 密码=\(psk)")
+            diag.warn("WiFi", "需要手动加入车机网络：SSID=\(ssid)；密码已隐藏")
             // 免费账号没有 HotspotConfiguration entitlement → 只能手动加。
             // 把凭证推到主页卡片（可复制），用户连好后按「连接车机」走缓存凭证直连。
             DispatchQueue.main.async {

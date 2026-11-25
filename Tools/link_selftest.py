@@ -185,12 +185,32 @@ def main():
     assert got_pkt is not None and got_msg is not None and got_msg["id"] == 0x1D01
     print("9. 逐字节流式累积解包 OK")
 
-    # 10. identification 实际编码形状抽查：param 1 = "CP-Receiver-1"
+    # 10. 一条消息跨两个链路包仍可在消息层拼回
+    first_half = msg[:len(msg) // 2]
+    second_half = msg[len(msg) // 2:]
+    fragments = [
+        encode_packet(ACK, 2, 0, 0x00, first_half),
+        encode_packet(ACK, 3, 2, 0x00, second_half),
+    ]
+    message_buf = bytearray()
+    recovered = None
+    for fragment in fragments:
+        kind, packet = decode_packet(fragment)
+        assert kind == "packet"
+        message_buf += packet["payload"]
+        kind2, candidate = parse_message(bytes(message_buf))
+        if kind2 == "message":
+            recovered = candidate
+            message_buf.clear()
+    assert recovered is not None and recovered["id"] == 0x1D01
+    print("10. 消息跨链路包边界拼接 OK")
+
+    # 11. identification 实际编码形状抽查：param 1 = "CP-Receiver-1"
     ident = encode_message(0x1D01, [(1, b"CP-Receiver-1")])
     assert ident[0:2] == b"\x40\x40"
     assert ident[2:4] == struct.pack(">H", len(ident))   # 长度 = 整条消息字节数
     assert ident[4:6] == b"\x1d\x01"
-    print("10. identification 编码形状 OK  (%s)" % ident.hex())
+    print("11. identification 编码形状 OK  (%s)" % ident.hex())
 
     print("\n全部通过 [OK]   （若真机握手日志与此不一致，按诊断 hex 只改 encode/decode 一处）")
 

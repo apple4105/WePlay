@@ -67,7 +67,27 @@ targets:
     # 依赖的框架都是系统框架（UIKit/CoreBluetooth/NetworkExtension/AVFoundation/
     # VideoToolbox/Security/CryptoKit/Combine），无需第三方，不需要 pods/spm。
 
-    scheme:
-      gatherCoverageData: false
-      commandLineArguments:
-        "": {}
+  WePlayTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Tests/WePlayTests
+    dependencies:
+      - target: WePlay
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.weplay.tests
+        SWIFT_VERSION: "5.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+
+
+schemes:
+  WePlay:
+    build:
+      targets:
+        WePlay: all
+        WePlayTests: [test]
+    test:
+      targets:
+        - WePlayTests

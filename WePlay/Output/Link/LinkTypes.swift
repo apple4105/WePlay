@@ -87,7 +87,15 @@ enum Link {
             guard (0...65535).contains(reply.port) else {
                 throw LinkError.badPort(reply.port)
             }
-            guard reply.mac.count == 17 else {
+            guard !reply.ssid.isEmpty, reply.ssid.count <= 32 else {
+                throw LinkError.badSSID
+            }
+            guard !reply.psk.isEmpty, reply.psk.count <= 64 else {
+                throw LinkError.badPSK
+            }
+            let macParts = reply.mac.split(separator: ":", omittingEmptySubsequences: false)
+            guard macParts.count == 6,
+                  macParts.allSatisfy({ $0.count == 2 && $0.allSatisfy(\.isHexDigit) }) else {
                 throw LinkError.badMAC(reply.mac)
             }
             return reply
@@ -103,6 +111,8 @@ enum LinkError: Error, CustomStringConvertible {
     case badFrequency(Int)
     case badPort(Int)
     case badMAC(String)
+    case badSSID
+    case badPSK
     case characteristicMissing(String)
     case notConnected
 
@@ -115,6 +125,8 @@ enum LinkError: Error, CustomStringConvertible {
         case .badFrequency(let f): return "频段越界：\(f)"
         case .badPort(let p): return "端口越界：\(p)"
         case .badMAC(let m): return "MAC 格式错：\(m)"
+        case .badSSID: return "SSID 格式错"
+        case .badPSK: return "Wi-Fi 密码格式错"
         case .characteristicMissing(let u): return "找不到特征 \(u)"
         case .notConnected: return "尚未连上车机"
         }

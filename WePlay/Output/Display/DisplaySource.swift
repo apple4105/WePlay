@@ -205,21 +205,21 @@ final class DisplaySource {
 
     // MARK: - 收
 
-    private var receiveBuffer = Data()
+    private var responseParser = RTSPResponseStreamParser()
 
     private func handleReceived(_ data: Data) {
-        receiveBuffer.append(data)
-        // 按 \r\n\r\n 切出完整响应（v1 假设响应不带 body；带 body 的按 Content-Length 处理）
-        while let range = receiveBuffer.firstRange(of: Data("\r\n\r\n".utf8)) {
-            let head = receiveBuffer.subdata(in: receiveBuffer.startIndex ..< range.lowerBound)
-            receiveBuffer.removeSubrange(receiveBuffer.startIndex ... range.upperBound)
-
-            guard let text = String(data: head, encoding: .utf8) else { continue }
-            let response = RTSPResponse.parse(text)
-            onLog?("[Display] ← \(response.statusLine)")
-            if let seq = response.cSeq, let handler = pendingRequests.removeValue(forKey: seq) {
-                handler(response)
+        do {
+            for response in try responseParser.append(data) {
+                onLog?("[Display] ← \(response.statusLine)")
+                if let seq = response.cSeq, let handler = pendingRequests.removeValue(forKey: seq) {
+                    handler(response)
+                } else {
+                    onLog?("[Display] 忽略无匹配 CSeq 的 RTSP 响应")
+                }
             }
+        } catch {
+            state = .failed(error.localizedDescription)
+            onFailure?(error)
         }
     }
 

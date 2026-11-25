@@ -1,15 +1,37 @@
 name: test-runner
-on: workflow_dispatch
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
 jobs:
-  probe-linux:
+  portable:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "ubuntu ok"
-  probe-mac:
+      - uses: actions/checkout@v4
+      - name: Protocol self-tests
+        run: |
+          python3 -I Tools/link_selftest.py
+          python3 -I Tools/rtp_selftest.py
+
+  ios-unit:
     runs-on: macos-latest
     steps:
-      - run: echo "macos-14 ok"
-  probe-mac15:
-    runs-on: macos-26
-    steps:
-      - run: echo "macos-15 ok"
+      - uses: actions/checkout@v4
+      - name: Prepare test resources
+        run: |
+          mkdir -p WePlay/Resources
+          printf 'placeholder' > WePlay/Resources/leaf.cer
+          printf 'placeholder' > WePlay/Resources/private.x963
+      - name: Generate project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+      - name: XCTest
+        run: |
+          xcodebuild test \
+            -project WePlay.xcodeproj \
+            -scheme WePlay \
+            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
+            CODE_SIGNING_ALLOWED=NO

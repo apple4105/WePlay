@@ -179,6 +179,7 @@ struct HomeView: View {
         Button {
             switch action.kind {
             case .start: controller.connectToCar()
+            case .continueWiFi: controller.resumeAfterManualWiFiJoin()
             case .stopScan: controller.stopScan()
             case .stopAll: controller.stop()
             case .disconnect: controller.stop()
@@ -196,7 +197,7 @@ struct HomeView: View {
         .padding(.top, 4)
     }
 
-    private enum ButtonKind { case start, stopScan, stopAll, disconnect }
+    private enum ButtonKind { case start, continueWiFi, stopScan, stopAll, disconnect }
 
     /// 手动加入车机 Wi-Fi 的凭证卡片。
     ///
@@ -269,9 +270,10 @@ struct HomeView: View {
         switch state.phaseText {
         case LinkController.Phase.carPlayActive.rawValue:
             return ("断开连接", .red, true, .disconnect)
+        case LinkController.Phase.wifiManualJoin.rawValue:
+            return ("已加入，继续连接", .mint, true, .continueWiFi)
         case LinkController.Phase.bleScanning.rawValue,
              LinkController.Phase.bleConnected.rawValue,
-             LinkController.Phase.wifiManualJoin.rawValue,
              LinkController.Phase.wifiJoined.rawValue,
              LinkController.Phase.wfdNegotiating.rawValue:
             // 连接全程都可停（照 OpenXPlay：进行中 = 停止）

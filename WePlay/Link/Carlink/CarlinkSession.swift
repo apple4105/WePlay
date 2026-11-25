@@ -34,7 +34,7 @@ final class CarlinkSession {
         static let rtp: UInt16 = 15550
         static let sensor: UInt16 = 57239
 
-        static let all: [UInt16] = [control, cert, media, rtsp, uibc]
+        static let all: [UInt16] = [control, cert, media, sensor, rtsp, uibc]
     }
 
     enum State: String {
@@ -78,6 +78,7 @@ final class CarlinkSession {
     private var authSequence: UInt32 = 1
     private var authRetries = 0
     private var authFrameReader = CarlinkFrameReader()
+    private var rtspTransport: CarlinkTransport?
     private(set) var awaitingPin = false
 
     private var listeners: [NWListener] = []
@@ -138,7 +139,9 @@ final class CarlinkSession {
         conn.stateUpdateHandler = { [weak self] st in
             switch st {
             case .ready:
-                self?.beginAuthExchange()
+                guard let self else { return }
+                self.beginAuthExchange()
+                self.receiveAuthLoop(conn)
             case .failed(let e):
                 self?.onError?(e)
                 self?.state = .ended
@@ -191,22 +194,91 @@ final class CarlinkSession {
     }
 
     private func sendAuthFrames(_ attempt: CarlinkAuth.Output) {
-        for f in attempt.frames {
-            authConnection?.send(content: f.encode(), completion: .contentProcessed { _ in })
-        }
-        if let key = attempt.sessionKey {
-            authSucceeded(key: key, peerKey: attempt.peerVerified)
-        }
         if attempt.pinRequired {
-            if authRetries == 0 {
-                authRetries += 1
-                awaitingPin = true
-                onLog?("车机要求配对码（PinRequired）")
-                onPinRequired?()
+            authRetries += 1
+            guard authRetries <= 1 else {
+                failAuthentication(CarlinkError.badPacket("auth_pin_required"))
+                return
+            }
+            awaitingPin = true
+            onLog?("车机要求配对码（PinRequired）")
+            onPinRequired?()
+            return
+        }
+        if attempt.confirmationRequired {
+            failAuthentication(CarlinkError.pinConfirmationRequired)
+            return
+        }
+        if attempt.rejected {
+            failAuthentication(CarlinkError.rejected)
+            return
+        }
+
+        sendAuthFrame(attempt.frames, index: 0) { [weak self] in
+            guard let self, let key = attempt.sessionKey else { return }
+            self.authSucceeded(key: key, peerKey: attempt.peerVerified)
+        }
+    }
+
+    private func sendAuthFrame(_ frames: [CarlinkFrame], index: Int, completion: @escaping () -> Void) {
+        guard index < frames.count else {
+            completion()
+            return
+        }
+        guard let connection = authConnection else {
+            failAuthentication(CarlinkError.badPacket("auth_connection_missing"))
+            return
+        }
+        connection.send(content: frames[index].encode(), completion: .contentProcessed { [weak self] error in
+            guard let self else { return }
+            if let error {
+                self.failAuthentication(error)
             } else {
-                onError?(CarlinkError.badPacket("auth_pin_required"))
+                self.sendAuthFrame(frames, index: index + 1, completion: completion)
+            }
+        })
+    }
+
+    private func receiveAuthLoop(_ connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
+            guard let self, self.authConnection === connection else { return }
+            if let data, !data.isEmpty {
+                self.handleAuthInbound(data)
+            }
+            if self.authConnection == nil { return }
+            if let error {
+                self.failAuthentication(error)
+            } else if isComplete {
+                self.failAuthentication(CarlinkError.badPacket("auth_connection_closed"))
+            } else {
+                self.receiveAuthLoop(connection)
             }
         }
+    }
+
+    private func handleAuthInbound(_ data: Data) {
+        do {
+            let frames = try authFrameReader.feed(data)
+            guard let authMachine else {
+                throw CarlinkError.badPacket("auth_state_missing")
+            }
+            for frame in frames {
+                onLog?("认证 ← 帧 seq=\(frame.sequence) method=\(frame.method) body=\(frame.body.count)B")
+                let result = authMachine.receive(frame: frame, time: nowSeconds())
+                sendAuthFrames(result)
+            }
+        } catch {
+            failAuthentication(error)
+        }
+    }
+
+    private func failAuthentication(_ error: Error) {
+        onLog?("认证失败：\(error)")
+        authConnection?.cancel()
+        authConnection = nil
+        authMachine = nil
+        onError?(error)
+        state = .ended
     }
 
     private func authSucceeded(key: Data, peerKey: Data?) {
@@ -222,6 +294,7 @@ final class CarlinkSession {
         authConnection?.cancel()
         authConnection = nil
         authMachine = nil
+        authFrameReader.reset()
         state = .negotiating
     }
 
@@ -232,16 +305,25 @@ final class CarlinkSession {
         sockets[port] = connection
 
         connection.stateUpdateHandler = { [weak self] st in
-            if case .failed(let e) = st { self?.onError?(e) }
-            if case .cancelled = st { self?.sockets[port] = nil }
+            guard let self else { return }
+            if case .failed(let e) = st {
+                if port == Ports.rtsp { self.rtspTransport?.onError?(e) }
+                self.onError?(e)
+            } else if case .cancelled = st {
+                self.sockets[port] = nil
+                if port == Ports.rtsp { self.rtspTransport = nil }
+            }
         }
+        connection.start(queue: queue)
         receiveLoop(port: port, connection: connection)
 
         guard [Ports.control, Ports.cert, Ports.media, Ports.sensor].contains(port) else {
             if port == Ports.rtsp {
                 state = .playing
                 onLog?("RTSP 通道建立（明文 WFD）——交投屏状态机")
-                onRtspAccepted?(CarlinkTransport(connection: connection))
+                let transport = CarlinkTransport(connection: connection)
+                rtspTransport = transport
+                onRtspAccepted?(transport)
             } else if port == Ports.uibc {
                 state = .playing
                 onLog?("UIBC 通道建立（明文触摸回传）")
@@ -273,9 +355,13 @@ final class CarlinkSession {
     }
 
     private func handleInbound(port: UInt16, data: Data) {
-        // RTSP / UIBC = 明文直通
-        if port == Ports.rtsp || port == Ports.uibc {
-            if port == Ports.uibc { onUibcData?(data) }
+        if port == Ports.rtsp {
+            rtspTransport?.deliver(data)
+            return
+        }
+        // UIBC = 明文直通
+        if port == Ports.uibc {
+            onUibcData?(data)
             return
         }
         // 其余服务 = CarlinkFrame + SecureRecord（字典取的是引用语义包装前的值类型，需可变拷贝）
@@ -337,6 +423,7 @@ final class CarlinkSession {
         sockets.removeAll()
         authConnection?.cancel()
         authConnection = nil
+        rtspTransport = nil
         ciphers.removeAll()
         frameReaders.removeAll()
         state = .ended
@@ -355,18 +442,11 @@ final class CarlinkTransport: DisplayTransport {
     }
 
     func start() {
-        connection.start(queue: DispatchQueue(label: "weplay.carlink.rtsp"))
-        receive()
+        // CarlinkSession owns the NWConnection lifecycle and forwards received bytes.
     }
 
-    private func receive() {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, complete, error in
-            guard let self else { return }
-            if let data, !data.isEmpty { self.onData?(data) }
-            if let error { self.onError?(error); return }
-            if complete { return }
-            self.receive()
-        }
+    func deliver(_ data: Data) {
+        onData?(data)
     }
 
     func send(_ data: Data) {
