@@ -98,6 +98,7 @@ final class LinkBootstrap: NSObject {
         credentialWriteStarted = false
         pinPromptIssued = false
         pinRetryUsed = false
+        cccdRetryUsed = false
     }
 
     /// 用户在 UI 里输入了配对码后调用。
@@ -140,14 +141,23 @@ final class LinkBootstrap: NSObject {
     /// 是否已经用过"输码后再发一次"的机会
     private var pinRetryUsed = false
 
-    private func requestCredentials(forceAfterPin: Bool = false) {
-        // 默认只发一次；只有"用户刚输入配对码"才允许额外一次
+    /// 写入后 CCCD 确认时允许的一次无 PIN 补发
+    private var cccdRetryUsed = false
+
+    private func requestCredentials(forceAfterPin: Bool = false,
+                                    allowCCCDRetry: Bool = false) {
+        // 默认只发一次；只有用户输入 PIN 或 CCCD 确认后的单次补发允许再写。
         if credentialWriteStarted {
-            guard forceAfterPin, !pinRetryUsed else {
+            if forceAfterPin {
+                guard !pinRetryUsed else {
+                    onLog?("[link] PIN 补发机会已用过，跳过")
+                    return
+                }
+                pinRetryUsed = true
+            } else if !allowCCCDRetry {
                 onLog?("[link] 已发过请求，跳过重复发送（避免身份/重试风暴）")
                 return
             }
-            pinRetryUsed = true
         }
         guard let peripheral, let phoneCharacteristic else {
             onFailure?(LinkError.characteristicMissing("phone \(Link.phoneCharacteristicUUID)"))
@@ -405,6 +415,12 @@ extension LinkBootstrap: CBPeripheralDelegate {
         } else {
             onLog?("[link] ✅ CCCD 订阅已确认（isNotifying=\(characteristic.isNotifying)）")
             cccdEnabled = characteristic.isNotifying
+            if characteristic.isNotifying, replyPending, !cccdRetryUsed,
+               lastPinCode == nil {
+                cccdRetryUsed = true
+                onLog?("[link] CCCD 已确认但尚无 HeadUnitReply → 补发一次相同 PhoneRequest")
+                requestCredentials(allowCCCDRetry: true)
+            }
         }
     }
 
