@@ -196,6 +196,9 @@ final class LinkController {
         // LinkParser 解 iAP2 包，消息/原始数据都打日志
         linkParser = LinkParser()
         linkParser.controlSessionID = nil
+        linkParser.onPresence = {
+            diag.log("iAP2", "← presence marker（FF55）")
+        }
         linkParser.onPacket = { [weak self] packet in
             guard let self else { return }
             // **相同包去重**：iOS 在对端没 ACK 时会原样重传（b91 里同一个 16B 包发了 17 次），
@@ -408,16 +411,16 @@ final class LinkController {
                 do {
                     let resp = try authenticator.respond(toChallenge: challenge)
                     diag.log("认证", "challenge 已签名（\(resp.signature.count) B）→ 0xAA03")
-                    send(message: LinkMessage(id: 0xAA03, parameters: [
-                        LinkParameter(id: 0x000E, value: resp.signature)
-                    ]))
+                    send(message: AccessoryMessages.authenticationResponse(signature: resp.signature))
                 } catch { diag.error("认证", "签名失败：\(error)") }
             } else {
                 diag.warn("认证", "0xAA02 缺少挑战数据或身份未装载")
             }
         case 0xAA04:
-            diag.log("认证", "← AuthenticationStatus (0xAA04)：\(message.parameters.first?.uintValue() ?? 0)")
-        case 0x0022:   // AuthenticationChallenge
+            diag.error("认证", "← AuthenticationFailed (0xAA04)：\(message.parameters.first?.uintValue() ?? 0)")
+        case 0xAA05:
+            diag.log("认证", "← AuthenticationSucceeded (0xAA05)")
+        case 0x0022:   // Legacy AuthenticationChallenge
             guard let challenge = message.parameter(0x000D)?.value, let authenticator else {
                 diag.warn("认证", "challenge 消息但缺少 0x000D 参数或身份未装载")
                 return
@@ -646,7 +649,7 @@ final class LinkController {
         do {
             let identity = try CarlinkTrustStore.shared.loadOrCreateIdentity()
             let session = CarlinkSession(headUnitIP: host, localIP: localIP,
-                                         identity: identity, trust: .shared, pin: nil)
+                                         identity: identity, trust: .shared, pin: savedPin)
             carlinkSession = session
             session.onLog = { diag.log("Carlink", $0) }
             session.onState = { st in
@@ -742,11 +745,15 @@ final class LinkController {
     /// UI 配对码输入 → Carlink 认证续跑
     func submitPin(_ code: String) {
         Diagnostics.shared.log("配对码", "用户输入（\(code.count) 位）")
-        // BLE 首次配对阶段要用（Client Info 的 pinCodeOrAuthentication）；
-        // Carlink 认证阶段也要用，两条路都喂一遍。
-        bleBootstrap?.submitPinCode(code)
-        carlinkSession?.submitPin(code)
-        savedPin = code
+        if carlinkSession?.awaitingPin == true {
+            savedPin = code
+            carlinkSession?.submitPin(code)
+        } else if bleBootstrap?.isConnected == true {
+            savedPin = code
+            bleBootstrap?.submitPinCode(code)
+        } else {
+            Diagnostics.shared.warn("配对码", "当前没有等待 PIN 的 BLE 或 Carlink 会话，忽略输入")
+        }
         PipelineState.shared.pinRequired = false
     }
 

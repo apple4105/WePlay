@@ -14,6 +14,9 @@ final class LinkParser {
     /// 解出一个完整链路层包
     var onPacket: ((LinkPacket) -> Void)?
 
+    /// 收到 iAP2 link initialization presence marker (`FF 55 02 00 EE 10`)
+    var onPresence: (() -> Void)?
+
     /// 解出一条控制会话消息
     var onMessage: ((LinkMessage) -> Void)?
 
@@ -29,6 +32,7 @@ final class LinkParser {
     private var buffer = Data()
     private var messageBuffer = Data()
     private let maxMessageBufferSize = 65_536
+    private let presenceMarker = LinkPacket.presence
 
     init() {}
 
@@ -46,6 +50,15 @@ final class LinkParser {
     private func drain() {
         while true {
             guard !buffer.isEmpty else { return }
+
+            if buffer.first == presenceMarker.first {
+                guard buffer.count >= presenceMarker.count else { return }
+                if buffer.prefix(presenceMarker.count) == presenceMarker {
+                    buffer.removeSubrange(0 ..< presenceMarker.count)
+                    onPresence?()
+                    continue
+                }
+            }
 
             switch LinkPacket.decode(buffer) {
             case .needMore:

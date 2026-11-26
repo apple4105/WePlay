@@ -79,6 +79,7 @@ final class CarlinkSession {
     private var authRetries = 0
     private var authFrameReader = CarlinkFrameReader()
     private var rtspTransport: CarlinkTransport?
+    private var authTimeout: DispatchWorkItem?
     private(set) var awaitingPin = false
 
     private var listeners: [NWListener] = []
@@ -136,18 +137,37 @@ final class CarlinkSession {
                                 port: NWEndpoint.Port(rawValue: Ports.auth)!,
                                 using: .tcp)
         authConnection = conn
+        onLog?("认证 → 连接车机 \(headUnitIP):\(Ports.auth)")
         conn.stateUpdateHandler = { [weak self] st in
+            guard let self else { return }
             switch st {
+            case .preparing:
+                self.onLog?("认证 TCP 状态 preparing")
             case .ready:
-                guard let self else { return }
+                self.onLog?("认证 TCP 已连接")
+                self.authTimeout?.cancel()
                 self.beginAuthExchange()
                 self.receiveAuthLoop(conn)
             case .failed(let e):
-                self?.onError?(e)
-                self?.state = .ended
-            default: break
+                self.authTimeout?.cancel()
+                self.onLog?("认证 TCP 失败：\(e)")
+                self.onError?(e)
+                self.state = .ended
+            case .cancelled:
+                self.onLog?("认证 TCP 已取消")
+            default:
+                break
             }
         }
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.state == .authenticating else { return }
+            self.onLog?("认证 TCP 连接超时（57209）")
+            self.authConnection?.cancel()
+            self.state = .ended
+            self.onError?(CarlinkError.badPacket("auth_connect_timeout"))
+        }
+        authTimeout = timeout
+        queue.asyncAfter(deadline: .now() + 12, execute: timeout)
         conn.start(queue: queue)
     }
 
@@ -166,8 +186,10 @@ final class CarlinkSession {
                                        peerPublic: trust.peerKey(for: headUnitIP))
             authMachine = auth
             authSequence = 1
+            onLog?("认证状态机启动（quick=\(trust.peerKey(for: headUnitIP) != nil)，PIN=\(pin == nil ? "无" : "有")）")
             let attempt = try auth.start(time: nowSeconds(), sequence: authSequence, pin: pin)
             awaitingPin = false
+            onLog?("认证首帧准备完成（\(attempt.frames.count) 帧）")
             sendAuthFrames(attempt)
         } catch CarlinkError.pinRequired {
             onLog?("首配需要配对码——请在车机查看后输入")

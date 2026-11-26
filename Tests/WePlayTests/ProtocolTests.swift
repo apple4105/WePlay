@@ -104,6 +104,35 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(ids, [0x0021, 0x0023])
     }
 
+    func testLinkParserConsumesFragmentedPresenceBeforePacket() {
+        let parser = LinkParser()
+        var presenceCount = 0
+        var packetCount = 0
+        parser.onPresence = { presenceCount += 1 }
+        parser.onPacket = { _ in packetCount += 1 }
+        let packet = LinkPacket(control: LinkPacket.controlACK, sequence: 1).encode()
+        let wire = LinkPacket.presence + packet
+
+        parser.append(wire.prefix(3))
+        XCTAssertEqual(presenceCount, 0)
+        parser.append(wire.dropFirst(3))
+
+        XCTAssertEqual(presenceCount, 1)
+        XCTAssertEqual(packetCount, 1)
+    }
+
+    func testAuthenticationMessagesUseAAFamilyAndParameterZero() {
+        let certificate = AccessoryMessages.authenticationCertificate(chain: Data([0xAA, 0xBB]))
+        XCTAssertEqual(certificate.id, 0xAA01)
+        XCTAssertEqual(certificate.parameters.map(\.id), [0])
+        XCTAssertEqual(certificate.parameters.first?.value, Data([0xAA, 0xBB]))
+
+        let response = AccessoryMessages.authenticationResponse(signature: Data([0xCC]))
+        XCTAssertEqual(response.id, 0xAA03)
+        XCTAssertEqual(response.parameters.map(\.id), [0])
+        XCTAssertEqual(response.parameters.first?.value, Data([0xCC]))
+    }
+
     func testRTSPStreamParserWaitsForContentLengthAndHandlesStickyResponses() throws {
         let body = "wfd_client_rtp_ports: RTP/AVP/UDP;unicast 19000 0\r\n"
         let response = "RTSP/1.0 200 OK\r\nCSeq: 2\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)"

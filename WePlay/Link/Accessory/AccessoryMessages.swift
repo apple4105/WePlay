@@ -104,17 +104,17 @@ enum AccessoryMessages {
 
     // MARK: - MFi 认证
 
-    /// 把配件证书链发给 iPhone（消息 0x0021）。
+    /// 把配件证书链发给 iPhone（AuthenticationCertificate 0xAA01）。
     static func authenticationCertificate(chain: Data) -> LinkMessage {
-        LinkMessage(id: 0x0021, parameters: [
-            LinkParameter(id: 0x000B, value: chain),   // Authentication Certificate
+        LinkMessage(id: 0xAA01, parameters: [
+            LinkParameter(id: 0, value: chain),
         ])
     }
 
-    /// 对 challenge 签名并回 0x0023。
+    /// 对 challenge 签名并回 AuthenticationResponse (0xAA03)。
     static func authenticationResponse(signature: Data) -> LinkMessage {
-        LinkMessage(id: 0x0023, parameters: [
-            LinkParameter(id: 0x000E, value: signature),   // Authentication Response Data
+        LinkMessage(id: 0xAA03, parameters: [
+            LinkParameter(id: 0, value: signature),
         ])
     }
 

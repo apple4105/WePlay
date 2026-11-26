@@ -205,11 +205,9 @@ final class LinkBootstrap: NSObject {
     /// 真实手机的时序就是"写一次 Client Info，等车机回"。
     private func scheduleReplyWatchdog() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
-            guard let self, self.replyPending, !self.pinPromptIssued,
-                  self.lastPinCode == nil else { return }
-            self.pinPromptIssued = true
-            self.onLog?("[link] 6 秒无凭证回复，提示输入车机屏幕配对码")
-            self.onPinCodeRequired?("")
+            guard let self, self.replyPending else { return }
+            self.onLog?("[link] 6 秒无凭证回复；BLE 本轮结束，不在 GATT 阶段猜测配对码")
+
         }
     }
 
