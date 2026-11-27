@@ -482,7 +482,7 @@ final class LinkController {
         startMediaSession()
 
         if let reply = cachedReply {
-            diag.log("管线", "有缓存凭证（SSID=\(reply.ssid)），跳过 BLE 直连")
+            diag.log("管线", "有缓存凭证（SSID=\(reply.ssid)），先检查当前车机网络")
             phase = .bleConnected
             joinCarWiFi(reply)
             return
@@ -579,11 +579,27 @@ final class LinkController {
 
     /// 用户手动切换到车机 Wi-Fi 后继续使用已缓存凭证，不再重复调用 NEHotspot。
     func resumeAfterManualWiFiJoin() {
-        guard phase == .wifiManualJoin, let reply = cachedReply else { return }
-        DispatchQueue.main.async { PipelineState.shared.manualJoin = nil }
-        phase = .wifiJoined
-        Diagnostics.shared.log("管线", "用户确认已手动加入车机 Wi-Fi，继续 Carlink")
-        startWFD(reply)
+        guard let reply = cachedReply,
+              phase == .wifiManualJoin || phase == .bleConnected || phase == .wifiJoined else { return }
+        let host = WiFiJoiner.guessGatewayIPv4() ?? "192.168.43.1"
+        Diagnostics.shared.log("WiFi", "检查车机网络可达性：\(host):57209")
+        wifiJoiner?.probeAuth(host: host) { [weak self] reachable in
+            guard let self else { return }
+            if reachable {
+                DispatchQueue.main.async { PipelineState.shared.manualJoin = nil }
+                self.phase = .wifiJoined
+                Diagnostics.shared.log("WiFi", "车机 57209 可达，继续 Carlink")
+                self.startWFD(reply)
+            } else {
+                Diagnostics.shared.warn("WiFi", "车机 57209 不可达，清除缓存并重新获取车机凭证")
+                self.cachedReply = nil
+                self.bleBootstrap?.stop()
+                self.bleBootstrap = nil
+                DispatchQueue.main.async { PipelineState.shared.manualJoin = nil }
+                self.phase = .transportReady
+                self.scanBLE()
+            }
+        }
     }
 
     /// 加入车机网络。NEHotspot 失败自动重试一次；系统对记住的网络通常会自己回连。
@@ -598,10 +614,8 @@ final class LinkController {
         }
         wifiJoiner.onJoined = { [weak self] ssid in
             guard let self else { return }
-            DispatchQueue.main.async { PipelineState.shared.manualJoin = nil }
-            self.phase = .wifiJoined
-            diag.log("管线", "已加入车机网络 \(ssid)")
-            self.startWFD(reply)
+            diag.log("管线", "系统接受 Wi-Fi 配置 \(ssid)，检查车机端口")
+            self.resumeAfterManualWiFiJoin()
         }
         wifiJoiner.onManualJoinRequired = { [weak self] (ssid, psk) in
             diag.warn("WiFi", "需要手动加入车机网络：SSID=\(ssid)；密码已隐藏")

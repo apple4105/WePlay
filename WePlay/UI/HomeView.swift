@@ -238,7 +238,11 @@ struct HomeView: View {
                             .font(.system(size: 12))
                     }
                 }
-                Text("去 设置 → Wi-Fi 连接「\(join.ssid)」，连好后回到 App 按「连接车机」（凭证已缓存，会直连）")
+                Button("去 Wi-Fi 设置连接") {
+                    WiFiJoiner.openWiFiSettings()
+                }
+                .font(.system(size: 13, weight: .semibold))
+                Text("连接「\(join.ssid)」后回到 App。WePlay 会先检查车机网络，确认可达后才继续。")
                     .font(.system(size: 11))
                     .foregroundColor(Color(white: 0.45))
                     .fixedSize(horizontal: false, vertical: true)

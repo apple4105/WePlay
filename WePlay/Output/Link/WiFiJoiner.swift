@@ -1,5 +1,7 @@
 import Foundation
+import Network
 import NetworkExtension
+import UIKit
 
 /// 加入显示端的 Wi-Fi 网络。
 ///
@@ -19,6 +21,13 @@ import NetworkExtension
 /// 两条都实现，用 `useHotspotConfiguration` 开关切；没 entitlement 时
 /// 自动 fallback 到手动（把凭证显示给用户）。
 final class WiFiJoiner {
+
+    static func openWiFiSettings() {
+        guard let url = URL(string: "App-Prefs:root=WIFI") else { return }
+        DispatchQueue.main.async {
+            UIApplication.shared.open(url)
+        }
+    }
 
     var onLog: ((String) -> Void)?
 
@@ -76,6 +85,33 @@ final class WiFiJoiner {
             }
             self.onLog?("[WiFi] 已加入 \(ssid)（joinOnce=\(joinOnce)）")
             self.onJoined?(ssid)
+        }
+    }
+
+    /// 探测车机 Carlink AUTH 端口，确认当前 Wi-Fi 已经能到车机。
+    func probeAuth(host: String, timeout: TimeInterval = 2,
+                   completion: @escaping (Bool) -> Void) {
+        let connection = NWConnection(host: NWEndpoint.Host(host),
+                                       port: NWEndpoint.Port(rawValue: 57209)!,
+                                       using: .tcp)
+        let queue = DispatchQueue(label: "weplay.wifi.probe")
+        var finished = false
+        let finish: (Bool) -> Void = { ok in
+            guard !finished else { return }
+            finished = true
+            connection.cancel()
+            DispatchQueue.main.async { completion(ok) }
+        }
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready: finish(true)
+            case .failed, .cancelled: finish(false)
+            default: break
+            }
+        }
+        connection.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + timeout) {
+            finish(false)
         }
     }
 
