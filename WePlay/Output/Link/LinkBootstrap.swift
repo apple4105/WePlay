@@ -132,6 +132,9 @@ final class LinkBootstrap: NSObject {
     /// 写回调里拿到的 peripheral（委托方法参数，供订阅用）
     private var peripheral_: CBPeripheral?
 
+    /// iOS 设备可能不回 didUpdateNotificationStateFor；兜底补发任务
+    private var cccdRetryWork: DispatchWorkItem?
+
     /// 是否已经提示用户输入配对码
     private var pinPromptIssued = false
 
@@ -342,10 +345,12 @@ extension LinkBootstrap: CBPeripheralDelegate {
             }
         }
 
-        // 保持 b91 曾收到车机回复的写入先行顺序；订阅回调只更新状态，不重复发请求。
-        requestCredentials()
+        // 先建立通知路由，再写 Client Info；Server Info 可能紧随写入到达。
         if let headUnitCharacteristic {
+            enableHeadUnitNotifications(on: headUnitCharacteristic, via: peripheral)
             peripheral.discoverDescriptors(for: headUnitCharacteristic)
+        } else {
+            requestCredentials()
         }
     }
 
@@ -389,6 +394,16 @@ extension LinkBootstrap: CBPeripheralDelegate {
         if characteristic.properties.contains(.notify) {
             onLog?("[link] setNotifyValue(true)（订阅通知，CCCD 0x0001）")
             peripheral.setNotifyValue(true, for: characteristic)
+            cccdRetryWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.isConnected, !self.credentialWriteStarted,
+                      !self.cccdRetryUsed else { return }
+                self.cccdRetryUsed = true
+                self.onLog?("[link] 未收到 CCCD 状态回调 → 一次性兼容写 PhoneRequest")
+                self.requestCredentials(allowCCCDRetry: true)
+            }
+            cccdRetryWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
         } else {
             onLog?("[link] 对端特征无 notify 属性（属性 \(characteristic.properties.rawValue)），无法订阅；直接写 Client Info")
             requestCredentials()
@@ -410,17 +425,14 @@ extension LinkBootstrap: CBPeripheralDelegate {
     ) {
         guard characteristic.uuid == Link.headUnitCharacteristicUUID else { return }
         if let error {
-            onLog?("[link] CCCD 订阅失败：\(error.localizedDescription)——仍写 Client Info（凭证可能收不到）")
+            onLog?("[link] CCCD 订阅失败：\(error.localizedDescription) → 兼容路径直写 PhoneRequest")
             requestCredentials()
         } else {
             onLog?("[link] ✅ CCCD 订阅已确认（isNotifying=\(characteristic.isNotifying)）")
             cccdEnabled = characteristic.isNotifying
-            if characteristic.isNotifying, replyPending, !cccdRetryUsed,
-               lastPinCode == nil {
-                cccdRetryUsed = true
-                onLog?("[link] CCCD 已确认但尚无 HeadUnitReply → 补发一次相同 PhoneRequest")
-                requestCredentials(allowCCCDRetry: true)
-            }
+            guard characteristic.isNotifying else { return }
+            onLog?("[link] 通知路由已建立 → 首次写 PhoneRequest")
+            requestCredentials()
         }
     }
 
