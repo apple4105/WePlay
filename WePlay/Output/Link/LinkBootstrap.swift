@@ -98,7 +98,6 @@ final class LinkBootstrap: NSObject {
         credentialWriteStarted = false
         pinPromptIssued = false
         pinRetryUsed = false
-        cccdRetryUsed = false
     }
 
     /// 用户在 UI 里输入了配对码后调用。
@@ -132,9 +131,6 @@ final class LinkBootstrap: NSObject {
     /// 写回调里拿到的 peripheral（委托方法参数，供订阅用）
     private var peripheral_: CBPeripheral?
 
-    /// iOS 设备可能不回 didUpdateNotificationStateFor；兜底补发任务
-    private var cccdRetryWork: DispatchWorkItem?
-
     /// 是否已经提示用户输入配对码
     private var pinPromptIssued = false
 
@@ -144,23 +140,14 @@ final class LinkBootstrap: NSObject {
     /// 是否已经用过"输码后再发一次"的机会
     private var pinRetryUsed = false
 
-    /// 写入后 CCCD 确认时允许的一次无 PIN 补发
-    private var cccdRetryUsed = false
-
-    private func requestCredentials(forceAfterPin: Bool = false,
-                                    allowCCCDRetry: Bool = false) {
-        // 默认只发一次；只有用户输入 PIN 或 CCCD 确认后的单次补发允许再写。
+    private func requestCredentials(forceAfterPin: Bool = false) {
+        // 默认只发一次；只有用户刚输入 PIN 才允许一次补发。
         if credentialWriteStarted {
-            if forceAfterPin {
-                guard !pinRetryUsed else {
-                    onLog?("[link] PIN 补发机会已用过，跳过")
-                    return
-                }
-                pinRetryUsed = true
-            } else if !allowCCCDRetry {
+            guard forceAfterPin, !pinRetryUsed else {
                 onLog?("[link] 已发过请求，跳过重复发送（避免身份/重试风暴）")
                 return
             }
+            pinRetryUsed = true
         }
         guard let peripheral, let phoneCharacteristic else {
             onFailure?(LinkError.characteristicMissing("phone \(Link.phoneCharacteristicUUID)"))
@@ -345,12 +332,11 @@ extension LinkBootstrap: CBPeripheralDelegate {
             }
         }
 
-        // 先建立通知路由，再写 Client Info；Server Info 可能紧随写入到达。
+        // 长城车机的 GATT 队列在订阅前写入时序最稳定：先写 Client Info，
+        // 写确认后再 setNotifyValue，Server Info 仍会通过后续通知送达。
+        requestCredentials()
         if let headUnitCharacteristic {
-            enableHeadUnitNotifications(on: headUnitCharacteristic, via: peripheral)
             peripheral.discoverDescriptors(for: headUnitCharacteristic)
-        } else {
-            requestCredentials()
         }
     }
 
@@ -394,16 +380,6 @@ extension LinkBootstrap: CBPeripheralDelegate {
         if characteristic.properties.contains(.notify) {
             onLog?("[link] setNotifyValue(true)（订阅通知，CCCD 0x0001）")
             peripheral.setNotifyValue(true, for: characteristic)
-            cccdRetryWork?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                guard let self, self.isConnected, !self.credentialWriteStarted,
-                      !self.cccdRetryUsed else { return }
-                self.cccdRetryUsed = true
-                self.onLog?("[link] 未收到 CCCD 状态回调 → 一次性兼容写 PhoneRequest")
-                self.requestCredentials(allowCCCDRetry: true)
-            }
-            cccdRetryWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
         } else {
             onLog?("[link] 对端特征无 notify 属性（属性 \(characteristic.properties.rawValue)），无法订阅；直接写 Client Info")
             requestCredentials()
@@ -430,9 +406,6 @@ extension LinkBootstrap: CBPeripheralDelegate {
         } else {
             onLog?("[link] ✅ CCCD 订阅已确认（isNotifying=\(characteristic.isNotifying)）")
             cccdEnabled = characteristic.isNotifying
-            guard characteristic.isNotifying else { return }
-            onLog?("[link] 通知路由已建立 → 首次写 PhoneRequest")
-            requestCredentials()
         }
     }
 
