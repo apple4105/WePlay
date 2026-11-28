@@ -473,15 +473,13 @@ final class LinkController {
             return
         }
 
-        // 虚拟 accessory 只在连接期间存在（避免幽灵配件顶掉其他 CarPlay 会话）
-        if transport == nil {
-            startTransport()
-        }
-
-        // 上次 stop 可能停掉了媒体监听，重新起一个（端口随 startSession 通告给 iPhone）
+        // 上次 stop 可能停掉了媒体监听，重新起一个（端口随 startSession 通告给 iPhone）。
         startMediaSession()
 
+        // 无缓存时先独立完成 BLE，避免虚拟 accessory 的 iAP2 SYN 与车机 GATT 建链并行争用。
+        // 有缓存凭证时维持快速路径，立即启动虚拟 accessory。
         if let reply = cachedReply {
+            if transport == nil { startTransport() }
             diag.log("管线", "有缓存凭证（SSID=\(reply.ssid)），先检查当前车机网络")
             phase = .bleConnected
             joinCarWiFi(reply)
@@ -511,6 +509,8 @@ final class LinkController {
             self.bleTimeout = nil
             diag.log("BLE", "✅ 凭证到手 SSID=\(reply.ssid) freq=\(reply.freq) port=\(reply.port)")
             self.cachedReply = reply
+            // BLE 完成后才启动虚拟 accessory，避免 iAP2 SYN 与 GATT 建链并行。
+            if self.transport == nil { self.startTransport() }
             self.phase = .bleConnected
             self.joinCarWiFi(reply)
         }
